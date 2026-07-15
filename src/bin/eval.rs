@@ -47,6 +47,7 @@ fn main() {
     let mut use_judge = true;
     let mut adv_only = false;
     let mut judge_model: Option<String> = None;
+    let mut ablate: Vec<String> = Vec::new();
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -62,6 +63,10 @@ fn main() {
             "--skip-adversarial" => { skip_adversarial = true; i += 1; }
             "--no-judge" => { use_judge = false; i += 1; }
             "--adv-only" => { adv_only = true; i += 1; }
+            "--ablate" => {
+                ablate = args.get(i + 1).map(|s| s.split(',').map(|x| x.trim().to_string()).collect()).unwrap_or_default();
+                i += 2;
+            }
             _ => i += 1,
         }
     }
@@ -87,7 +92,7 @@ fn main() {
     // Conv 0 has a prebuilt (Claude-partitioned) tree; other convs are built
     // via online ingestion, the stress test showed the online-grown tree
     // routes as well as the prebuilt one (74.0% vs 72.1%).
-    let driver = match std::fs::read_to_string(&tree_path) {
+    let mut driver = match std::fs::read_to_string(&tree_path) {
         Ok(s) => {
             eprintln!("[prebuilt tree: building name embeddings…]");
             let tree_data: serde_json::Value = serde_json::from_str(&s).expect("tree json");
@@ -103,6 +108,19 @@ fn main() {
             d
         }
     };
+    for a in &ablate {
+        match a.as_str() {
+            "tree" => driver.route_cfg.use_tree = false,
+            "bm25" => driver.route_cfg.use_bm25 = false,
+            "dense" => driver.route_cfg.use_dense = false,
+            "cap" => driver.route_cfg.max_load = 1000,
+            "resolver" => driver.route_cfg.temporal_notes = false,
+            other => eprintln!("unknown ablation: {other}"),
+        }
+    }
+    if !ablate.is_empty() {
+        eprintln!("[ablated: {}]", ablate.join(","));
+    }
     eprintln!(
         "[driver: {} messages, {} leaves, depth {}, embeddings built in {:.1}s]",
         driver.message_len(),
@@ -134,6 +152,10 @@ fn main() {
     // Adversarial (category 5) handling
     let mut adv_total = 0usize;
     let mut adv_handled = 0usize;
+
+    // Systems metrics: memory-side vs generation-side time per query.
+    let mut retr_ms: Vec<f64> = Vec::new();
+    let mut gen_ms: Vec<f64> = Vec::new();
 
     let mut jsonl_file = jsonl_path.as_ref().map(|p| {
         std::fs::File::create(p).expect("create jsonl")
@@ -234,6 +256,8 @@ fn main() {
         }
 
         let result = kernel.query(question, &[]);
+        retr_ms.push(result.retrieval_ms);
+        gen_ms.push(result.generation_ms);
         let answer = result.response.trim().to_string();
         n += 1;
 
@@ -318,6 +342,15 @@ fn main() {
     println!("Page faults fired: {faults}/{n}");
     if adv_total > 0 {
         println!("Adversarial (cat5) handled (page-fault/refuse): {adv_handled}/{adv_total}");
+    }
+    retr_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    gen_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let pct = |v: &Vec<f64>, p: usize| v.get(v.len() * p / 100).copied().unwrap_or(0.0);
+    if !retr_ms.is_empty() {
+        println!(
+            "Latency ms (p50/p95): retrieval {:.0}/{:.0} | generation {:.0}/{:.0}",
+            pct(&retr_ms, 50), pct(&retr_ms, 95), pct(&gen_ms, 50), pct(&gen_ms, 95)
+        );
     }
     println!("-----------------------------------------------------");
     println!("ROUGE-L by category (and judge acc):");

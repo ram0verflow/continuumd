@@ -66,6 +66,10 @@ pub struct QueryResult {
     pub route_path: String,
     pub messages_loaded: usize,
     pub memory_budget_tokens: usize,
+    /// Time spent on the memory side: query embedding, routing, block load.
+    pub retrieval_ms: f64,
+    /// Time spent generating (including any fault retry).
+    pub generation_ms: f64,
 }
 
 /// The kernel owns a set of drivers and the LLM handle. Each driver is a Volume.
@@ -203,9 +207,13 @@ impl Kernel {
 
     /// Full inference loop with the page-fault retry.
     pub fn query(&self, user_message: &str, session: &[ChatMessage]) -> QueryResult {
+        let t0 = std::time::Instant::now();
         let (messages, mut result) = self.prepare(user_message, session);
+        result.retrieval_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
+        let t1 = std::time::Instant::now();
         result.response = self.complete(&messages).unwrap_or_else(|e| format!("[ERROR: {e}]"));
+        result.generation_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
         // Page fault interception (spec §3.1).
         if self.config.enable_page_faults {

@@ -91,6 +91,8 @@ pub struct HierarchicalTopicDriver {
     bm25: Option<Bm25Index>,
     /// Online embedder for incremental ingestion (None => keyword-only).
     embedder: Option<Ollama>,
+    /// Ablation switches; default is the full pipeline.
+    pub route_cfg: RouteConfig,
     /// Leaf path that received the previous online message, conversational
     /// continuity prior (dialogue tends to stay on topic).
     last_leaf_path: Option<Vec<String>>,
@@ -107,6 +109,24 @@ const CONTINUITY_BONUS: f32 = 0.20; // prior for the previous message's leaf
 const CONTENT_OVERLAP_W: f32 = 0.25; // per shared informative token, capped
 const MAX_LEAF_SIZE: usize = 14; // split leaves beyond this
 
+/// Ablation switches for the retrieval pipeline. Everything on by default;
+/// the eval binary flips pieces off one at a time to measure what each
+/// component contributes.
+#[derive(Clone, Debug)]
+pub struct RouteConfig {
+    pub use_tree: bool,
+    pub use_bm25: bool,
+    pub use_dense: bool,
+    pub max_load: usize,
+    pub temporal_notes: bool,
+}
+
+impl Default for RouteConfig {
+    fn default() -> Self {
+        RouteConfig { use_tree: true, use_bm25: true, use_dense: true, max_load: 30, temporal_notes: true }
+    }
+}
+
 impl HierarchicalTopicDriver {
     pub fn new(namespace: &str) -> Self {
         HierarchicalTopicDriver {
@@ -116,6 +136,7 @@ impl HierarchicalTopicDriver {
             name_embeddings: HashMap::new(),
             bm25: None,
             embedder: None,
+            route_cfg: RouteConfig::default(),
             last_leaf_path: None,
             last_path: std::cell::RefCell::new(String::new()),
         }
@@ -483,7 +504,7 @@ impl MemoryIndexDriver for HierarchicalTopicDriver {
         // timestamps form a timeline for temporal questions.
         const MAX_LEAVES: usize = 6;
         const BM25_TOP: usize = 20;
-        const MAX_LOAD: usize = 30;
+        let max_load = self.route_cfg.max_load;
 
         let mut candidates: std::collections::HashSet<usize> = std::collections::HashSet::new();
         let mut bm25_score: HashMap<usize, f32> = HashMap::new();
@@ -491,7 +512,7 @@ impl MemoryIndexDriver for HierarchicalTopicDriver {
         let mut path = String::new();
 
         // Dense: beam over the topic tree.
-        if self.tree.is_some() && !query_embedding.is_empty() {
+        if self.route_cfg.use_tree && self.tree.is_some() && !query_embedding.is_empty() {
             let query_lower = query_text.to_lowercase();
             let leaves = self.collect_leaves_beam(&query_lower, query_embedding);
             path.push_str("beam:");
@@ -505,7 +526,7 @@ impl MemoryIndexDriver for HierarchicalTopicDriver {
         }
 
         // Sparse: BM25 keyword hits (+ conversational ±1 neighbors).
-        if let Some(bm25) = &self.bm25 {
+        if let Some(bm25) = self.bm25.as_ref().filter(|_| self.route_cfg.use_bm25) {
             let hits = bm25.top_k(query_text, BM25_TOP);
             if !hits.is_empty() {
                 path.push_str(&format!(" | bm25[{}]", hits.len()));
@@ -538,7 +559,7 @@ impl MemoryIndexDriver for HierarchicalTopicDriver {
                 if let Some(rank) = leaf_rank.get(&idx) {
                     s += 0.3 / (1.0 + *rank as f32); // leaf 0 → +0.30, leaf 5 → +0.05
                 }
-                if !query_embedding.is_empty() {
+                if self.route_cfg.use_dense && !query_embedding.is_empty() {
                     if let Some(msg) = self.msg_by_idx(idx) {
                         if let Some(emb) = &msg.embedding {
                             s += cosine(query_embedding, emb);
@@ -549,7 +570,7 @@ impl MemoryIndexDriver for HierarchicalTopicDriver {
             })
             .collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(MAX_LOAD);
+        scored.truncate(max_load);
 
         // Chronological presentation.
         let mut ids: Vec<usize> = scored.into_iter().map(|(_, idx)| idx).collect();
@@ -580,7 +601,7 @@ impl MemoryIndexDriver for HierarchicalTopicDriver {
             // Deterministic temporal resolution ("MMU for dates"): if this
             // message speaks in relative time, resolve it against the
             // message's own timestamp and remember the note.
-            if notes.len() < 8 {
+            if self.route_cfg.temporal_notes && notes.len() < 8 {
                 if let Some((y, m, d)) = parse_msg_date(&msg.timestamp) {
                     let tl = msg.text.to_lowercase();
                     if let Some((phrase, resolution)) = resolve_phrase(&tl, y, m, d) {

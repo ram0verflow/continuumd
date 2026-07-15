@@ -100,6 +100,41 @@ llama-server -m $BLOB --port 8080 -c 8192 --slots --slot-save-path $PWD/kv_slots
 ./target/release/aios chat --kv
 ```
 
+## Ablations, other models, a second benchmark
+
+Removing one retrieval component at a time (conversation 0, base llama 3.1,
+ROUGE-L, same 154 questions):
+
+| configuration | ROUGE-L | page faults |
+|---|---|---|
+| full pipeline | 0.449 | 14 |
+| without tree routing | 0.455 | 12 |
+| without dense embeddings | 0.442 | 16 |
+| without the date resolver | 0.424 | 13 |
+| without BM25 | 0.265 | 66 |
+| without the 30 message cap | 0.118 | 1 |
+
+The cap and BM25 carry the system. Removing the cap reproduces the failure
+that shaped the design: the model reads a hundred loosely relevant messages,
+answers wrongly with confidence, and generation time doubles. The tree adds
+nothing on this benchmark; its case is browsing and scale, not QA, and I keep
+it because the online ingestion path builds it for free.
+
+Same stack, different answer models, same questions: mistral 7b scores 0.432,
+nearly identical to llama's 0.449, so the architecture is not tuned to one
+model family. phi3 mini (3.8B) drops to 0.215; below some capability floor
+the model cannot use what gets paged in.
+
+Retrieval cost, measured: 33 to 57 ms at the median against 7 to 14 seconds
+of generation. The memory side is about half a percent of a query.
+
+BABILong (facts hidden in 64k tokens of book text, answered through a 4k
+window, exact match): qa1 13/20, qa2 0/20, qa3 2/20, qa4 12/20, qa5 20/20.
+Single fact tasks work well through sparse retrieval. Chained fact tasks
+fail, the same multi hop weakness LoCoMo showed, and the known failure mode
+of retrieval systems generally. Fetch the data with `fetch_babilong.py`,
+run with `cargo run --release --bin babilong`.
+
 ## Running the benchmarks
 
 Generate predictions for one conversation, or all ten:
