@@ -24,7 +24,7 @@ path = "src/bin/stress.rs"
 opt-level = 3
 
 [workspace]
-members = [".", "kvpoc"]
+members = [".", "kvpoc", "daemon"]
 
 [[bin]]
 name = "transfer"

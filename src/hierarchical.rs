@@ -504,6 +504,14 @@ impl MemoryIndexDriver for HierarchicalTopicDriver {
         self.ingest_turn_impl(speaker, text, timestamp)
     }
 
+    fn get_message(&self, idx: usize) -> Option<(String, String, String)> {
+        self.msg_by_idx(idx).map(|m| (m.speaker.clone(), m.text.clone(), m.timestamp.clone()))
+    }
+
+    fn set_max_load(&mut self, n: usize) {
+        self.route_cfg.max_load = n.max(1);
+    }
+
     fn persist(&self, path: &str) -> std::io::Result<()> {
         self.save(path)
     }

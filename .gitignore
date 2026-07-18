@@ -26,3 +26,10 @@ __pycache__/
 
 # companion state (its memory; personal, never committed)
 /companion/
+
+# frontend
+/app/node_modules/
+/app/dist/
+
+# user media (personal, never committed)
+/shots/raw/

@@ -51,6 +51,16 @@ pub trait MemoryIndexDriver {
     fn persist(&self, _path: &str) -> std::io::Result<()> {
         Ok(())
     }
+
+    /// Read one indexed message back out as (speaker, text, timestamp), for
+    /// surfaces that show retrieval results next to their source turns.
+    /// Default: not supported.
+    fn get_message(&self, _idx: usize) -> Option<(String, String, String)> {
+        None
+    }
+
+    /// Cap on how many messages one query may load. Default: not tunable.
+    fn set_max_load(&mut self, _n: usize) {}
 }
 
 /// Type-safe partitioned tree (spec §4.2).

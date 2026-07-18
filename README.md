@@ -2,6 +2,10 @@
 
 An experiment in giving a local LLM long term memory by treating the context window like RAM. A small Rust kernel decides what gets paged into the window for each query, the model is trained to reply `CONTEXT_NEEDED: <topic>` when the loaded memory does not answer the question, and everything lives on disk in a versioned store so old facts get demoted rather than deleted.
 
+It grew into an application: a daemon that owns the memory, and a web app in front of it with one timeline and no sessions. Kill the process, switch the model, come back a month later. It remembers.
+
+![the timeline: a web fault, a memory forming, a cited answer](shots/app-timeline.png)
+
 The whole thing runs on one MacBook (M5, 24GB). Everything from embeddings to the fine tune runs locally through Ollama and MLX. I spent about five dollars total on cloud, all of it on Claude API calls to grade benchmark answers.
 
 I make no claims beyond the numbers below, which come from one benchmark on one machine. Read the caveats before quoting anything.
@@ -18,9 +22,44 @@ The fine tune came from the benchmark itself. Conversations 1 through 9 supplied
 
 Two things about evaluation that I got wrong at first and had to fix. I was grading answers with the same 8B model that produced them, and when I re graded with Claude Haiku the score dropped 19 points. Every number below is from the external judge. And I worried the base model might know this public dataset from pretraining, so I asked it the conv 0 questions with no memory attached. It scored 1.3%, which is guessing.
 
-One result I did not expect: the nine conversations I never tuned retrieval on scored a bit higher than the one I iterated against. So the retrieval stack was not overfit to my dev set, the dev conversation just happens to be harder.
+## How a turn works
 
-The KV cache part came last. Prefill is 97 to 99% of query latency here, and llama.cpp can save per sequence KV state to disk and shift RoPE positions of cached tokens. That means a memory block can be encoded once at position zero, saved, and later restored at any offset and stitched next to other blocks without re reading the text. It works: the model answered correctly from a block that had been shifted 30 positions. There is also a harness that runs a fake coding session where the codebase is five times the context window, and the planted facts survive while questions about absent code get refused. I wrote that codebase and those questions myself, so treat it as a demo rather than an evaluation.
+```mermaid
+sequenceDiagram
+    participant U as user
+    participant D as daemon
+    participant M as model
+    U->>D: POST /v1/turn
+    D->>D: route memory, assemble the working set
+    D->>M: generate, streamed
+    alt the model raises a fault
+        M-->>D: CONTEXT_NEEDED / WEB_NEEDED / TOOL_NEEDED
+        D->>D: repage memory, or search, or call the tool
+        D->>M: regenerate with the new block
+    end
+    M-->>U: tokens stream out
+    D->>D: classify the exchange, write memory, append to the journal
+```
+
+The fault idea generalizes past memory. `CONTEXT_NEEDED` asks the kernel for a different slice of the past. `WEB_NEEDED: <query>` asks the daemon to search (Brave if a key is on file, a keyless DuckDuckGo fallback otherwise). `TOOL_NEEDED: <server.tool> <json>` calls a tool from any MCP server declared in `~/.aios/mcp.json`. In every case the daemon intercepts the line before the user sees it, does the work, hands the result back as context, and the model answers for real.
+
+The memory budget for a turn is what is left of the window after overhead and the recent session:
+
+$$B = \max\Big(200,\ N_{ctx} - T_{overhead} - T_{reply} - \sum_{m \in S_6} |m|/4\Big)$$
+
+where $S_6$ is the last six session messages and $|m|/4$ is the usual four characters per token guess.
+
+Candidate messages come in broad (tree beam plus keyword hits plus their neighbors), then get reranked and cut hard. Each candidate $i$ scores
+
+$$s_i = \hat{b}_i + \frac{0.3}{1 + r_i} + \cos(q, e_i)$$
+
+with $\hat{b}_i$ the keyword score normalized to the top hit, $r_i$ the rank of the topic leaf that produced it, and the cosine term present when embeddings exist. The top 30 by $s_i$ are loaded in chronological order. The cap is the single most important number in the system; the ablation table below shows what happens without it.
+
+When the session window fills, the most evictable slot goes first:
+
+$$v_x = \frac{t - t_{last}}{60} - 5\,a_x + \tau_x + \beta_x$$
+
+staleness in minutes, minus five per access, $\tau_x$ is +20 off topic or -10 on topic, and $\beta_x$ makes raw messages go before details and details before summaries. Identity and pinned slots never evict. Eviction is demotion: evicted messages land in the store's archive, not the trash.
 
 ## Numbers
 
@@ -37,58 +76,73 @@ The fine tuned row is conv 0 only because the tune trained on the other nine. On
 
 Caveats that matter. Mem0 reports 62 to 67% in its own publications using stronger answer models, so a good part of any system's headline number is the answer model, not the memory layer. Mem0's high refusal rate here comes partly from retrieving less: a system that finds little says "I don't know" a lot, which looks disciplined on unanswerable questions. Mem0 ingestion also cost 25 minutes to 4 hours per conversation on this hardware since it extracts facts with an LLM, versus about a minute here. The judge is nondeterministic by roughly one question per 150. The KV and coding session results are single digit sample sizes. And all of this is one benchmark.
 
+## The daemon and the app
+
+The prototype server grew into the real shape: a long lived localhost daemon that owns the kernel, the versioned store, and an append only journal under `~/.aios/`, plus a React frontend that is a thin client of it. One user, one timeline, one memory. There are no sessions anywhere in the API or the UI, and existing `companion/` state is adopted on first boot.
+
+```mermaid
+flowchart LR
+    APP[web app] --> D
+    ANY[anything that speaks http] --> D
+    subgraph daemon [aios daemon, localhost only]
+        D[api and sse] --> W[worker thread: kernel and eviction window]
+        D --> J[(journal, jsonl)]
+        W --> K[kernel]
+        K --> DRV[conversation driver: tree, keywords, embeddings]
+        K --> ST[(four level store, versioned)]
+    end
+    W --> PR{provider}
+    PR --> OL[ollama]
+    PR --> CL[claude api]
+    PR --> OA[openai compatible]
+    PR --> LS[llama-server, kv paging]
+```
+
+One worker thread owns the kernel as an actor: requests in over a channel, events out per turn, so a slow generation never blocks the status endpoint and cancellation works. The journal is the timeline's source of truth and is never used for retrieval; the drivers do retrieval.
+
+![the memory browser: identity on top, topics as blocks, every value versioned](shots/app-memory.png)
+
+The memory browser shows what it believes about you, topic by topic. Every value keeps its history (the store is copy on write), every fact links back to the turn that formed it, corrections write a new version, and deletion is the one true delete. Memory formation is classified locally by default, whichever model answers; a settings toggle hands classification to the answer model instead, which is sharper but means the exchange leaves the machine twice.
+
+Models are swappable mid conversation from a header menu: hosted Claude models gated on whether a key is on file, any OpenAI compatible endpoint, and whatever Ollama has pulled. Continuity survives the swap because memory never lived in the model. The KV cache tier does not survive it and quietly rebuilds.
+
+Privacy modes are enforced in the daemon, not the frontend. Persistent remembers everything. Incognito talks, writes nothing, and its journal entries are purged on exit. Paused recalls freely and writes nothing. Turns can carry images, stored under `~/.aios/media/` and passed to whichever provider can see them; a text only model says it cannot see the image instead of erroring. The app does voice in both directions with no cloud: browser speech recognition in, system speech synthesis out.
+
+There is also a landing page and a thesis page, because the argument matters as much as the code:
+
+![never explain yourself twice](shots/landing.png)
+
 ## Running it
 
-You need Rust and Ollama with two models pulled. The dataset comes from GitHub.
+You need Rust and Ollama with two models pulled.
 
 ```
-# models
 ollama pull llama3.1:8b
 ollama pull nomic-embed-text
 ollama serve
 
-# dataset: get locomo10.json from the snap-research/locomo repo on GitHub
-# and put it at data/locomo10.json
-
-cargo test            # 27 unit tests, no network or models needed
-cargo build --release
+cargo test                                # unit tests, no network needed
+cargo build --release -p aios-daemon
+(cd app && npm install && npm run build)  # once, for the UI
+./target/release/aios-daemon              # http://localhost:4310
 ```
 
-Basic use:
+Keys, all optional, live in `~/.aios/keys` as one JSON object, chmod 600, never logged, never returned by the API: `anthropic` for Claude, `openai` for OpenAI compatible endpoints, `brave` for real web search. MCP servers go in `~/.aios/mcp.json` and their tools show up on the next daemon start.
+
+The API, localhost JSON with SSE for the turn stream: `POST /v1/turn`, `POST /v1/turn/cancel`, `GET /v1/timeline`, `GET /v1/memory/search`, `GET /v1/memory/browse`, `POST /v1/memory/correct`, `POST /v1/memory/delete`, `GET/PUT /v1/settings`, `GET /v1/status`, `GET /v1/models`, `GET /v1/digest`, `GET /v1/media/<file>`, `POST /v1/kv/*`.
+
+The older single file companion still works if you want the minimal version:
 
 ```
-./target/release/aios info
+./target/release/aios serve --model llama3.1:8b     # http://localhost:3210
+```
+
+For the benchmark CLI, get locomo10.json from the snap-research/locomo repo on GitHub, put it at data/locomo10.json, then:
+
+```
 ./target/release/aios ask "When did Caroline go to the LGBTQ support group?"
 ./target/release/aios chat
 ```
-
-## The companion
-
-`aios serve` runs the whole thing as a local web app on http://localhost:3210.
-One binary, no other dependencies, nothing leaves your machine.
-
-```
-./target/release/aios serve --model llama3.1:8b
-```
-
-The left side is a chat with streamed replies. The right side has two tabs:
-a kernel log showing what happened on every turn (memories paged in, page
-faults, what got written back, evictions) and a memory tab that lists what
-it currently believes about you, topic by topic. Its memory lives in
-`companion/` on disk, so you can kill the process, start it again, and it
-still knows what you told it. Tell it your name in one session and ask who
-you are in the next.
-
-There is an endurance script that hammers this loop: it plants ten facts,
-buries them under a hundred turns of unrelated chatter on the small fixed
-window, then asks for them back. `python3 endurance.py <port>` against a
-running server.
-
-Notes from using it: write back runs one extra model call per turn, so
-replies take a few seconds longer than plain chat. The 8B model sometimes
-decorates recalled facts, in one test it added a year to a date I never
-gave it. And if llama-server is already running on port 8080 the companion
-picks it up and uses KV state save and restore automatically.
 
 Chat with KV persistence (attention states saved to disk on exit, restored on start). Needs llama-server, which reads GGUF straight out of the Ollama blob store:
 
@@ -159,6 +213,20 @@ fail, the same multi hop weakness LoCoMo showed, and the known failure mode
 of retrieval systems generally. Fetch the data with `fetch_babilong.py`,
 run with `cargo run --release --bin babilong`.
 
+There is an endurance script that hammers the live loop: it plants ten
+facts, buries them under a hundred turns of unrelated chatter on the small
+fixed window, then asks for them back. 130 turns over 104 minutes, the
+window never went over budget, 9 of 10 facts came back (the tenth was a
+grader casing bug). `python3 endurance.py <port>` against a running server.
+
+Notes from living with it: write back runs one extra model call per turn,
+so replies take a few seconds longer than plain chat. The 8B model
+sometimes decorates recalled facts; in one test it added a year to a date I
+never gave it. The 8B write back classifier also files things under odd
+topic names, which is why the store deduplicates on write and the browser
+has correct and delete. A bigger classifier, or handing classification to
+the answer model, fixes more of that than prompt tweaks do.
+
 ## Running the benchmarks
 
 Generate predictions for one conversation, or all ten:
@@ -219,6 +287,8 @@ Training took my machine about 12 hours per round because it throttles. A rented
 
 ## The KV experiments
 
+Prefill is 97 to 99% of query latency here, and llama.cpp can save per sequence KV state to disk and shift RoPE positions of cached tokens. That means a memory block can be encoded once at position zero, saved, and later restored at any offset and stitched next to other blocks without re reading the text. It works: the model answered correctly from a block that had been shifted 30 positions. There is also a harness that runs a fake coding session where the codebase is five times the context window, and the planted facts survive while questions about absent code get refused. I wrote that codebase and those questions myself, so treat it as a demo rather than an evaluation. KV state files are model locked at about 125 KB per token; text stays the source of truth and KV is a cache tier, never the store.
+
 These use llama.cpp through FFI, so the first build takes a couple of minutes.
 
 ```
@@ -240,11 +310,15 @@ src/codegraph.rs     code driver: symbol extraction + BM25, no embeddings
 src/store.rs         four level versioned store
 src/eviction.rs      context window eviction and demotion
 src/llamaserver.rs   llama-server client for KV save/restore
-src/server.rs        the companion web app (aios serve), UI embedded from src/ui.html
+src/server.rs        the original single file companion (aios serve)
 src/bin/eval.rs      LoCoMo runner
 src/bin/stress.rs    all ten conversations merged into one store
 src/bin/transfer.rs  fine tuned model on code questions it never trained on
 kvpoc/               KV cache proofs of concept
+daemon/              aios-daemon: worker actor, journal, providers, web search, mcp client
+app/                 React frontend: timeline, memory browser, landing, thesis
+shots/               the screenshots above
+DESIGN.md            the product spec the daemon and app were built from
 ```
 
 Not done: a latency comparison against warm prefix caching, and a test on a real repository instead of a synthetic one.

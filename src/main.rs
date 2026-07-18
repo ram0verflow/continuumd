@@ -26,8 +26,14 @@ fn main() {
             let model = flag_value(&args, "--model").unwrap_or_else(|| "llama3.1:8b".to_string());
             aios::server::run(port, &model);
         }
+        "daemon" => {
+            // The daemon lives in its own crate so this library stays
+            // dependency-free and embeddable.
+            eprintln!("the daemon is its own binary:");
+            eprintln!("  cargo run --release -p aios-daemon    # http://localhost:4310, state in ~/.aios/");
+        }
         _ => {
-            eprintln!("usage: aios [info | tree <conv.json> | ask <question> | chat [--kv] | serve [--port P] [--model M]]");
+            eprintln!("usage: aios [info | tree <conv.json> | ask <question> | chat [--kv] | serve [--port P] [--model M] | daemon]");
         }
     }
 }

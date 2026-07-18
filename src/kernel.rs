@@ -158,19 +158,26 @@ impl Kernel {
         (block, driver.namespace().to_string(), format!("{}", indices.len()), indices.len())
     }
 
-    fn assemble_prompt(&self, context: &str) -> String {
+    fn assemble_prompt(&self, context: &str, template: &str) -> String {
         let ctx = if self.identity.is_empty() {
             context.to_string()
         } else {
             format!("[IDENTITY]\n{}\n\n{}", self.identity, context)
         };
-        SYSTEM_TEMPLATE.replace("{context}", &ctx)
+        template.replace("{context}", &ctx)
     }
 
     /// Page in memory for a query and build the full message list, without
     /// calling the model. Lets callers that stream generation themselves (the
     /// web server) reuse the exact routing and assembly the kernel uses.
     pub fn prepare(&self, user_message: &str, session: &[ChatMessage]) -> (Vec<ChatMessage>, QueryResult) {
+        self.prepare_with(user_message, session, SYSTEM_TEMPLATE)
+    }
+
+    /// Same, with a caller-supplied system template (`{context}` placeholder).
+    /// The tuned local model needs SYSTEM_TEMPLATE's exact bytes; other
+    /// surfaces may want the same routing under a different voice.
+    pub fn prepare_with(&self, user_message: &str, session: &[ChatMessage], template: &str) -> (Vec<ChatMessage>, QueryResult) {
         let mut result = QueryResult::default();
         let budget = self.compute_budget(session);
         result.memory_budget_tokens = budget;
@@ -180,7 +187,7 @@ impl Kernel {
         result.route_path = route_path;
         result.messages_loaded = loaded;
 
-        let system = self.assemble_prompt(&context);
+        let system = self.assemble_prompt(&context, template);
         let mut messages = vec![ChatMessage::new("system", system)];
         for m in session.iter().rev().take(6).rev() {
             messages.push(m.clone());
@@ -192,11 +199,15 @@ impl Kernel {
     /// Same as prepare, but pages in on the FAULT topic instead of the user
     /// message. Returns None when nothing pages in for that topic.
     pub fn prepare_fault(&self, topic: &str, user_msg: &str, session: &[ChatMessage], budget: usize) -> Option<Vec<ChatMessage>> {
+        self.prepare_fault_with(topic, user_msg, session, budget, SYSTEM_TEMPLATE)
+    }
+
+    pub fn prepare_fault_with(&self, topic: &str, user_msg: &str, session: &[ChatMessage], budget: usize, template: &str) -> Option<Vec<ChatMessage>> {
         let (context, _ns, _path, _n) = self.page_in(topic, budget);
         if context.trim().is_empty() {
             return None;
         }
-        let system = self.assemble_prompt(&context);
+        let system = self.assemble_prompt(&context, template);
         let mut messages = vec![ChatMessage::new("system", system)];
         for m in session.iter().rev().take(4).rev() {
             messages.push(m.clone());
@@ -254,7 +265,12 @@ For each new piece of information worth remembering, output a JSON object:
 {\"type\":\"<TYPE>\",\"content\":\"<what>\",\"branch\":\"<where>\"}
 
 Types: BRANCH_UPDATE, NEW_BRANCH, DECISION, PREFERENCE_CHANGE, IDENTITY_UPDATE, EPHEMERAL
-Output ONLY a JSON array. If nothing to update: []";
+
+Remember only NEW facts the User stated about themselves, their life, their
+decisions, or their work. Greetings, questions, chit-chat, and things the
+Assistant said are EPHEMERAL. Facts already covered by an existing branch
+are EPHEMERAL unless they changed.
+Output ONLY a JSON array. If nothing new: []";
 
 #[derive(Debug, Clone)]
 pub struct WriteBack {
@@ -307,25 +323,72 @@ impl Kernel {
 
     /// Apply write-backs to the store. Returns how many changed the store.
     pub fn apply_write_backs(store: &mut MemoryStore, wbs: &[WriteBack], now: Timestamp) -> usize {
+        Self::apply_write_backs_from(store, wbs, "write_back", now)
+    }
+
+    /// Same, with an explicit provenance string (e.g. `turn:42`) so surfaces
+    /// can link a memory back to the exchange that formed it.
+    ///
+    /// Deduplicates as it applies: small classifiers restate the same fact
+    /// under two labels in one batch, and re-remember loaded context on later
+    /// turns. A fact whose content already lives in the target branch (or in
+    /// the identity) is a no-op, not a thirteenth copy.
+    pub fn apply_write_backs_from(store: &mut MemoryStore, wbs: &[WriteBack], source: &str, now: Timestamp) -> usize {
+        let norm = |s: &str| s.to_lowercase().trim().trim_end_matches(['.', '!']).to_string();
+        let mut seen: Vec<String> = Vec::new();
         let mut changed = 0;
         for wb in wbs {
             if wb.kind == "EPHEMERAL" || wb.content.is_empty() {
                 continue;
             }
+            let key = format!("{}|{}", norm(&wb.branch), norm(&wb.content));
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
             match wb.kind.as_str() {
                 "IDENTITY_UPDATE" => {
+                    if norm(store.get_identity()).contains(&norm(&wb.content)) {
+                        continue;
+                    }
                     let merged = format!("{} {}", store.get_identity(), wb.content).trim().to_string();
-                    store.set_identity(&merged, "write_back", now);
+                    store.set_identity(&merged, source, now);
                     changed += 1;
                 }
                 "NEW_BRANCH" => {
                     let name = if wb.branch.is_empty() { &wb.content } else { &wb.branch };
-                    store.create_branch(name, &wb.content, "write_back", now);
+                    // "New" branch the store already knows, restating a fact
+                    // it already holds anywhere: a no-op, not a summary bump.
+                    if let Some(b) = store.get_branch(name) {
+                        let c = norm(&wb.content);
+                        let known = norm(b.summary.current()) == c
+                            || b.details.iter().any(|d| {
+                                let cur = d.current();
+                                let body = cur.split_once("] ").map(|(_, t)| t).unwrap_or(cur);
+                                norm(body) == c
+                            });
+                        if known {
+                            continue;
+                        }
+                    }
+                    store.create_branch(name, &wb.content, source, now);
                     changed += 1;
                 }
                 "BRANCH_UPDATE" | "DECISION" | "PREFERENCE_CHANGE" => {
                     let name = if wb.branch.is_empty() { "general" } else { &wb.branch };
-                    store.add_detail(name, &format!("[{}] {}", wb.kind, wb.content), "write_back", now);
+                    let duplicate = store.get_branch(name).map_or(false, |b| {
+                        let c = norm(&wb.content);
+                        norm(b.summary.current()) == c
+                            || b.details.iter().any(|d| {
+                                let cur = d.current();
+                                let body = cur.split_once("] ").map(|(_, t)| t).unwrap_or(cur);
+                                norm(body) == c
+                            })
+                    });
+                    if duplicate {
+                        continue;
+                    }
+                    store.add_detail(name, &format!("[{}] {}", wb.kind, wb.content), source, now);
                     changed += 1;
                 }
                 _ => {}
@@ -361,6 +424,12 @@ impl Kernel {
     /// Borrow the mounted driver, for surfaces that need to inspect or persist it.
     pub fn driver(&self) -> Option<&dyn MemoryIndexDriver> {
         self.drivers.first().map(|d| d.as_ref())
+    }
+
+    /// Mutably borrow the mounted driver, for surfaces that ingest turns
+    /// themselves (e.g. to control write-back provenance).
+    pub fn driver_mut(&mut self) -> Option<&mut Box<dyn MemoryIndexDriver>> {
+        self.drivers.first_mut()
     }
 }
 
@@ -422,6 +491,26 @@ mod tests {
         // Garbage input degrades to empty, never panics.
         assert!(parse_write_backs("no json here").is_empty());
         assert!(parse_write_backs("[{\"type\":42}]").is_empty());
+    }
+
+    #[test]
+    fn write_backs_deduplicate() {
+        let mut store = MemoryStore::new();
+        let wbs = vec![
+            WriteBack { kind: "BRANCH_UPDATE".into(), content: "Building a kernel in Rust.".into(), branch: "project".into() },
+            WriteBack { kind: "PREFERENCE_CHANGE".into(), content: "building a kernel in Rust".into(), branch: "project".into() },
+        ];
+        // Same fact under two labels in one batch: one detail, not two.
+        assert_eq!(Kernel::apply_write_backs(&mut store, &wbs, 1.0), 1);
+        // Re-remembered on a later turn: no thirteenth copy.
+        assert_eq!(Kernel::apply_write_backs(&mut store, &wbs[..1], 2.0), 0);
+        assert_eq!(store.get_branch("project").unwrap().details.len(), 1);
+
+        // Identity fragments already present don't re-append forever.
+        store.set_identity("Name: Abhi", "user", 3.0);
+        let id = vec![WriteBack { kind: "IDENTITY_UPDATE".into(), content: "name: abhi".into(), branch: String::new() }];
+        assert_eq!(Kernel::apply_write_backs(&mut store, &id, 4.0), 0);
+        assert_eq!(store.get_identity(), "Name: Abhi");
     }
 
     #[test]

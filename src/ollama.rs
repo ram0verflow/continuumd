@@ -21,11 +21,20 @@ pub struct Ollama {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    /// Base64 image payloads for vision models, in the exact field shape
+    /// Ollama's chat API expects. None serializes to nothing, so text-only
+    /// traffic is byte-identical to before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<String>>,
 }
 
 impl ChatMessage {
     pub fn new(role: &str, content: impl Into<String>) -> Self {
-        ChatMessage { role: role.to_string(), content: content.into() }
+        ChatMessage { role: role.to_string(), content: content.into(), images: None }
+    }
+
+    pub fn with_images(role: &str, content: impl Into<String>, images: Vec<String>) -> Self {
+        ChatMessage { role: role.to_string(), content: content.into(), images: Some(images) }
     }
 }
 
