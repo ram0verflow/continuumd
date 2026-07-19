@@ -215,6 +215,18 @@ impl Kernel {
         self.prepare_fault_with(topic, user_msg, session, budget, SYSTEM_TEMPLATE)
     }
 
+    /// Page in the driver block for a fault topic, without rebuilding the
+    /// message list. The daemon's action loop appends it as new context so
+    /// faults can chain within one turn.
+    pub fn fault_block(&self, topic: &str, budget: usize) -> Option<String> {
+        let (context, _ns, _path, _n) = self.page_in(topic, budget);
+        if context.trim().is_empty() {
+            None
+        } else {
+            Some(context)
+        }
+    }
+
     pub fn prepare_fault_with(&self, topic: &str, user_msg: &str, session: &[ChatMessage], budget: usize, template: &str) -> Option<Vec<ChatMessage>> {
         let (context, _ns, _path, _n) = self.page_in(topic, budget);
         if context.trim().is_empty() {
@@ -473,8 +485,10 @@ impl Kernel {
 }
 
 /// What share of `a`'s informative tokens (lowercase, alphanumeric, longer
-/// than three chars) also appear in `b`. 0 when `a` has none.
-fn token_overlap_pct(a: &str, b: &str) -> usize {
+/// than three chars) also appear in `b`. 0 when `a` has none. Public so
+/// surfaces that need "same thing, different words" (the daemon's fault
+/// dedup) reuse this comparator instead of growing their own.
+pub fn token_overlap_pct(a: &str, b: &str) -> usize {
     let tokens = |s: &str| -> std::collections::HashSet<String> {
         s.to_lowercase()
             .split(|c: char| !c.is_alphanumeric())

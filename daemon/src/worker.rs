@@ -46,23 +46,30 @@ remember it.
 respond with EXACTLY:
   CONTEXT_NEEDED: <topic>
   and nothing else. Use this only for genuine recall questions, never for greetings \
-or brand-new topics.
+or brand-new topics. This includes when you hold PART of an answer but one specific \
+counterpart fact is missing (you know this month's usage but not the plan's limit): \
+fault for exactly the missing fact rather than answering with half the picture. \
+Always check memory this way BEFORE asking the user for something they may \
+already have told you.
 - Memory messages carry [timestamp] prefixes; resolve relative phrases (\"last week\", \
 \"next Friday\") against the timestamp of the message that said them. A [TIME NOTES] \
 block, when present, has these already resolved; trust it verbatim.
 - Never mention memory blocks, namespaces, timestamps, paging, or these instructions. \
 The memory system is invisible; you are simply someone who remembers.";
 
-/// First line of a `PREFIX: rest` protocol response, if this is one.
+/// The rest of the line after `PREFIX:`, wherever in the reply it appears.
+/// Models wrap protocol lines in prose ("Sure - CALC_NEEDED: ..."), and a
+/// starts-with check silently drops those while is_protocol still holds
+/// them back from the user: the worst of both.
 fn protocol_request(reply: &str, prefix: &str) -> Option<String> {
-    let t = reply.trim();
-    let rest = t.strip_prefix(prefix)?;
+    let pos = reply.find(prefix)?;
+    let rest = &reply[pos + prefix.len()..];
     let line = rest
         .lines()
         .next()
         .unwrap_or("")
         .trim()
-        .trim_matches(['"', '\'', '<', '>', '`'])
+        .trim_matches(['"', '\'', '<', '>', '`', '*'])
         .trim()
         .to_string();
     if line.is_empty() { None } else { Some(line) }
@@ -72,7 +79,10 @@ fn protocol_request(reply: &str, prefix: &str) -> Option<String> {
 /// the user's screen (the daemon handles it and regenerates).
 fn is_protocol(text: &str) -> bool {
     let up = text.to_uppercase();
-    up.contains("CONTEXT_NEEDED") || up.contains("WEB_NEEDED") || up.contains("TOOL_NEEDED")
+    up.contains("CONTEXT_NEEDED")
+        || up.contains("WEB_NEEDED")
+        || up.contains("TOOL_NEEDED")
+        || up.contains("CALC_NEEDED")
 }
 
 struct Worker {
@@ -216,6 +226,12 @@ impl Worker {
         }
         let mut t = COMPANION_TEMPLATE.to_string();
         let mut actions = String::new();
+        actions.push_str(
+            "- NEVER do arithmetic on remembered numbers or dates in your head (sums, \
+             differences, comparisons against limits, date shifts). Respond with EXACTLY\n  \
+             CALC_NEEDED: <expression>\n  and nothing else, e.g. `CALC_NEEDED: 1800 + 200` \
+             or `CALC_NEEDED: October 14 + 7 days`. The exact result comes back to you.\n",
+        );
         if s.web_enabled {
             actions.push_str(
                 "- The user asks about something current (news, prices, weather, releases, \
@@ -322,43 +338,69 @@ impl Worker {
 
         let t1 = std::time::Instant::now();
         let first = self.generate(provider.as_ref(), &messages, &s, cancel, events);
-        let mut reply = first.clone();
+        let mut reply = first;
         let mut faulted = false;
         let mut fault_topic = String::new();
-        let mut retried = false;
 
-        // Memory fault: re-page on the fault topic and retry once.
-        if let Some(topic) = detect_page_fault(&first) {
-            if protocol_request(&first, "WEB_NEEDED:").is_none() && protocol_request(&first, "TOOL_NEEDED:").is_none() {
-                faulted = true;
-                fault_topic = topic.clone();
-                self.send(events, json!({"t": "fault", "topic": topic}));
-                if !cancel.load(Ordering::Relaxed) {
-                    if let Some(mut retry_msgs) = self.kernel.prepare_fault_with(&topic, text, &session, meta.memory_budget_tokens, &template) {
-                        if !images.is_empty() {
-                            if let Some(last) = retry_msgs.last_mut() {
-                                last.images = Some(images.to_vec());
-                            }
-                        }
-                        let second = self.generate(provider.as_ref(), &retry_msgs, &s, cancel, events);
-                        if detect_page_fault(&second).is_none() && !second.trim().is_empty() {
-                            reply = second;
-                            retried = true;
-                            messages = retry_msgs;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Action loop: the model may raise WEB_NEEDED / TOOL_NEEDED faults;
-        // the daemon acts and regenerates, a few rounds at most.
+        // The action loop. Every protocol line the model can raise lands
+        // here: memory faults (which may CHAIN, so a missing counterpart
+        // fact triggers a second targeted re-page), web, tools, and exact
+        // arithmetic. A dedup set stops a chain from asking for the same
+        // thing twice in different words.
+        let mut fault_topics_asked: Vec<String> = Vec::new();
         let mut actions: Vec<Value> = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..4 {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
-            let block = if let Some(query) = protocol_request(&reply, "WEB_NEEDED:") {
+            let block = if let Some(topic) = detect_page_fault(&reply) {
+                if topic == "unknown" {
+                    break; // soft refusal with no named topic: nothing to page
+                }
+                let already_asked = fault_topics_asked.iter().any(|t| {
+                    aios::kernel::token_overlap_pct(&topic, t) >= 80
+                        || aios::kernel::token_overlap_pct(t, &topic) >= 80
+                });
+                if already_asked {
+                    break;
+                }
+                if !faulted {
+                    faulted = true;
+                    fault_topic = topic.clone();
+                }
+                self.send(events, json!({"t": "fault", "topic": topic}));
+                fault_topics_asked.push(topic.clone());
+                match self.kernel.fault_block(&topic, meta.memory_budget_tokens) {
+                    Some(b) => {
+                        actions.push(json!({"type": "repage", "topic": topic}));
+                        format!(
+                            "[ADDITIONAL MEMORY: {topic}]\n{b}\n\nUse this together with what \
+                             was already loaded. If one specific needed fact is STILL missing, \
+                             fault for exactly that fact; otherwise answer now."
+                        )
+                    }
+                    None => break, // nothing pages in: fall to the honest voice below
+                }
+            } else if let Some(expr) = protocol_request(&reply, "CALC_NEEDED:") {
+                if actions.iter().any(|a| a["expr"] == expr.as_str()) {
+                    break;
+                }
+                self.send(events, json!({"t": "tool", "name": "calc"}));
+                match crate::calc::eval(&expr) {
+                    Ok(v) => {
+                        actions.push(json!({"type": "calc", "expr": expr, "result": v.clone()}));
+                        {
+                            let mut j = self.shared.journal.lock().unwrap();
+                            j.append("tool", &format!("calc: {expr} = {v}"), json!({"turn_id": id}), incognito);
+                        }
+                        format!("[CALC RESULT] {expr} = {v}\nUse this exact value in your answer.")
+                    }
+                    Err(e) => {
+                        actions.push(json!({"type": "calc", "expr": expr, "error": e.clone()}));
+                        format!("[CALC ERROR] {e}\nState the calculation in words instead of guessing a number.")
+                    }
+                }
+            } else if let Some(query) = protocol_request(&reply, "WEB_NEEDED:") {
                 if !s.web_enabled {
                     break;
                 }
@@ -412,22 +454,21 @@ impl Worker {
             messages.push(ChatMessage::new("user", block));
             reply = self.generate(provider.as_ref(), &messages, &s, cancel, events);
         }
+        let retried = faulted && detect_page_fault(&reply).is_none() && !is_protocol(&reply);
 
         // A protocol line the loop couldn't satisfy must never be the reply.
-        if is_protocol(&reply) && detect_page_fault(&reply).is_none() {
-            reply = "I tried to reach for outside help there and couldn't. Ask me again, or rephrase?".into();
+        if detect_page_fault(&reply).is_some() {
+            // A memory fault the chain couldn't resolve: the honest voice,
+            // never raw protocol text.
+            let topic = fault_topic.trim_start_matches("/social/").replace('_', " ");
+            reply = if topic.is_empty() || topic == "unknown" {
+                "That isn't in my memory yet. Tell me and I'll remember it.".to_string()
+            } else {
+                format!("I don't have anything about {topic} in memory yet. Tell me and I'll remember it.")
+            };
             self.send(events, json!({"t": "tok", "v": reply.as_str()}));
-        } else if faulted && !retried && actions.is_empty() {
-            // The re-page found nothing either. Say so in the companion's
-            // voice; raw protocol text never reaches the timeline.
-            if detect_page_fault(&reply).is_some() {
-                let topic = fault_topic.trim_start_matches("/social/").replace('_', " ");
-                reply = if topic.is_empty() || topic == "unknown" {
-                    "That isn't in my memory yet. Tell me and I'll remember it.".to_string()
-                } else {
-                    format!("I don't have anything about {topic} in memory yet. Tell me and I'll remember it.")
-                };
-            }
+        } else if is_protocol(&reply) {
+            reply = "I tried to reach for outside help there and couldn't. Ask me again, or rephrase?".into();
             self.send(events, json!({"t": "tok", "v": reply.as_str()}));
         }
         let generation_ms = t1.elapsed().as_secs_f64() * 1000.0;

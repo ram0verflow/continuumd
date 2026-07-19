@@ -26,6 +26,7 @@ import urllib.request
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 4310
 MODE = sys.argv[2] if len(sys.argv) > 2 else "off"
+GAPS = int(sys.argv[3]) if len(sys.argv) > 3 else 2  # distractors per round; raise for long transcripts
 BASE = f"http://127.0.0.1:{PORT}"
 
 # Each case: ordered mentions (planted with distractor gaps between them),
@@ -38,7 +39,7 @@ CASES = [
             "Heads up: I'm pushing everything in my calendar back by exactly one week.",
         ],
         "question": "when is my dentist appointment?",
-        "needle": "october 21",
+        "needles": ["october 21"],
         "forbidden": ["october 14"],
     },
     {
@@ -48,7 +49,7 @@ CASES = [
             "My landlord told me everything goes up by 200 starting next month.",
         ],
         "question": "what will my rent be next month?",
-        "needle": "2000",
+        "needles": ["2000", "2,000"],
         "forbidden": ["1800"],
     },
     {
@@ -60,7 +61,7 @@ CASES = [
             "Final answer: I've settled on zed as my main editor for good.",
         ],
         "question": "what is my main editor these days?",
-        "needle": "zed",
+        "needles": ["zed"],
         "forbidden": ["vim", "helix", "neovim"],
     },
     {
@@ -71,7 +72,7 @@ CASES = [
             "Standup is now 8:45, the earlier slot won the vote.",
         ],
         "question": "what time is standup?",
-        "needle": "8:45",
+        "needles": ["8:45"],
         "forbidden": ["9:00", "9:30"],
     },
     {
@@ -81,7 +82,9 @@ CASES = [
             "I've burned through about 62 thousand calls so far this month.",
         ],
         "question": "am I over my monthly API allowance?",
-        "needle": "over",
+        # A verdict, not an echo of the question: "over" alone false-passed
+        # a reply that merely restated the question and asked for the data.
+        "needles": ["over by", "you're over", "you are over", "exceed", "12 thousand", "12,000", "12000"],
         "forbidden": [],
     },
 ]
@@ -137,7 +140,7 @@ def main():
         for c in CASES:
             if r < len(c["mentions"]):
                 turn(c["mentions"][r])
-        for _ in range(2):
+        for _ in range(GAPS):
             turn(GAP[gi % len(GAP)])
             gi += 1
 
@@ -147,7 +150,7 @@ def main():
         reply, done = turn(c["question"])
         insp = (done or {}).get("inspector", {})
         low = reply.lower()
-        ok = c["needle"] in low
+        ok = any(n in low for n in c["needles"])
         stale = any(f in low for f in c["forbidden"]) and not ok
         results.append({"case": c["name"], "reply": reply, "ok": ok, "stale": stale,
                         "store_topics": insp.get("store_topics"),

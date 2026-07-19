@@ -8,6 +8,7 @@
 
 mod api;
 mod bedrock;
+mod calc;
 mod journal;
 mod mcp;
 mod providers;

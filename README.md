@@ -350,6 +350,32 @@ the scale run that answers it needs the harnesses above run dozens of
 times per condition, which is hours of model time and the next piece of
 work on this thread.
 
+The composition failure got its fix, and the fix got a regression test,
+and the regression test caught two of my own bugs before it caught the
+system improving. Memory faults now chain: the fault loop handles
+CONTEXT_NEEDED alongside web and tools, so a model holding half an
+answer can fault for exactly the missing counterpart and get one
+targeted re-page, with a dedup set (the same token overlap comparator
+the identity guard uses) stopping a chain from asking the same thing
+twice in different words. Arithmetic on remembered values goes through a
+deterministic evaluator now, not model math: the model raises
+CALC_NEEDED, a small parser computes sums and date shifts exactly, and
+the result comes back as context. On the rerun the suite went 5 of 5,
+and the journal shows the machinery earning it: October 14 plus 7 days
+and 62000 minus 50000 both went through the calculator, and the
+composition answer was a real verdict, "exceeded your plan limit by
+12,000 calls". Two graders' notes for honesty: my first pass at this
+rerun scored a false pass (the answer merely echoed the word "over"
+while asking the user for data that was sitting in memory; the needle
+now requires a verdict), and a protocol parsing bug of mine (prefix
+matched only at the start of a reply while the holdback matched it
+anywhere) produced one artificial failure first. Also honest: in the
+passing run retrieval happened to surface both composition facts, so the
+new fault chain was not exercised end to end; the repeated runs now in
+flight exist to catch the case where retrieval misses one side. Until
+they land, every number in this section is one or two runs old and
+should be read as a smoke test.
+
 ![recall after total eviction, exact answers at ~40ms](shots/stress-recall.png)
 
 Notes from living with it: write back runs one extra model call per turn,

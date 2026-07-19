@@ -246,7 +246,7 @@ fn amz_timestamp() -> (String, String) {
     (format!("{date}T{hh:02}{mm:02}{ss:02}Z"), date)
 }
 
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
+pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
@@ -285,7 +285,7 @@ fn parse_iso8601(s: &str) -> Option<u64> {
     Some((days as u64) * 86400 + hh * 3600 + mm * 60 + ss)
 }
 
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+pub(crate) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
