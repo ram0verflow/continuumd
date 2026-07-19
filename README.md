@@ -303,6 +303,53 @@ identity, provenance, the archive, and the browser. If capture gets good
 enough to know things the raw history doesn't say plainly, this
 experiment is sitting there ready to rerun.
 
+That verdict had a hole in it, though: every fact in the harness lives in
+one message, which is the case raw retrieval was never going to lose. So
+there are two more instruments. `leak_gauntlet.py` measures near miss
+confabulation per answer model: plant a gym locker combination, then ask
+about a pool locker, a bike lock, an office locker, and a train time that
+were never mentioned, twice each, on a fresh state per model. Nova Pro
+leaked 0 of 8. Llama 3.3 70B leaked 1 of 8, but two of its trials were
+eaten by rate limits so its denominator is soft. Nova 2 Lite and qwen2.5
+14B leaked 2 of 8 each. Every single leak, on every model that leaked,
+was the pool locker question specifically; the other three frames never
+tempted anyone. The daemon now defaults to the model that never leaked,
+and the harder tests below ran on it.
+
+`stress_discriminate.py` plants cases that do not live in one message:
+synthesis (the dentist date in one turn, "pushing everything in my
+calendar back a week" thirty turns later, phrased to share no keyword
+with the question), contradiction chains (an editor changed three times,
+a standup time changed twice, every mention keyword-equal to the
+question so recency cannot come from lexical luck), and cross topic
+composition (a 50 thousand request plan and a 62 thousand usage stated
+separately, then "am I over my allowance"). Run twice on the clean
+model, store context off and on, fresh state each.
+
+Both conditions scored 4 of 5, and the details matter more than the tie.
+Raw retrieval plus an answer model that combines at answer time handled
+synthesis in both conditions: the off condition reply literally walked
+"originally October 14th, pushed a week, October 21st", and both
+contradiction chains resolved to the latest value. "Search cannot
+combine" undersells what the answer model does with a well ordered
+working set, at least at this transcript size, and that is a real
+revision to my expectations, which had the store winning these. And both
+conditions failed the same case, the composition one: retrieval surfaced
+the usage but not the plan (the question shares keywords with only one
+of them), and the store had not captured both facts either, so the block
+paged in nothing. Neither architecture can do this today. It is the same
+shape as the chained fact weakness LoCoMo and BABILong already showed,
+and the fix candidates are the same: fault driven second retrieval, or
+capture reliable enough to pre join facts that belong together.
+
+The honest limits: one run per condition, and a 34 turn transcript, which
+with a 30 message load cap means retrieval had good odds of surfacing
+scattered mentions by volume alone. Whether answer time synthesis
+survives a transcript of hundreds of messages is the open question, and
+the scale run that answers it needs the harnesses above run dozens of
+times per condition, which is hours of model time and the next piece of
+work on this thread.
+
 ![recall after total eviction, exact answers at ~40ms](shots/stress-recall.png)
 
 Notes from living with it: write back runs one extra model call per turn,
