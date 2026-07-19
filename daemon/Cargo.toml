@@ -17,3 +17,6 @@ serde_json = "1"
 # streaming-with-cancellation, which the dependency-free client lacks.
 ureq = { version = "2.10", features = ["json"] }
 base64 = "0.22"
+# SigV4 signing for the Bedrock adapter.
+sha2 = "0.10"
+hmac = "0.12"

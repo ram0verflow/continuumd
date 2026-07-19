@@ -138,6 +138,7 @@ export function Settings({ onSaved }: { onSaved: () => void }) {
           <option value="ollama">Ollama (local)</option>
           <option value="claude">Claude</option>
           <option value="openai_compat">OpenAI-compatible</option>
+          <option value="bedrock">AWS Bedrock</option>
           <option value="llamaserver">llama-server</option>
         </select>
       </label>

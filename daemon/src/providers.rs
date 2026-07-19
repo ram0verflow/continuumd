@@ -67,6 +67,10 @@ pub fn build(settings: &Settings, keys: &Keys) -> Result<Box<dyn Provider>, Stri
             api_key: keys.get("openai").unwrap_or("").to_string(),
         })),
         "llamaserver" => Ok(Box::new(LlamaServerProvider { port: 8080 })),
+        "bedrock" => Ok(Box::new(BedrockProvider {
+            model_id: settings.model.clone(),
+            region: crate::bedrock::default_region(),
+        })),
         other => Err(format!("unknown provider '{other}'")),
     }
 }
@@ -410,6 +414,93 @@ impl Provider for LlamaServerProvider {
         }
         Ok(full)
     }
+}
+
+// --- Claude on Bedrock (the user's own AWS account) ---------------------------
+
+/// Non-streaming, like llama-server: Bedrock's stream uses AWS event-stream
+/// binary framing, deferred until the plain path proves out. Credentials
+/// resolve through the AWS CLI, so `aws login` is the only setup.
+pub struct BedrockProvider {
+    pub model_id: String,
+    pub region: String,
+}
+
+impl Provider for BedrockProvider {
+    fn label(&self) -> String {
+        format!("bedrock/{}", self.model_id)
+    }
+
+    fn caps(&self) -> ProviderCaps {
+        ProviderCaps { supports_system: true, max_context: 200_000 }
+    }
+
+    fn chat_stream(
+        &self,
+        messages: &[ChatMessage],
+        max_tokens: usize,
+        temperature: f32,
+        on_token: &mut dyn FnMut(&str),
+        cancel: &AtomicBool,
+    ) -> Result<String, String> {
+        if cancelled(cancel) {
+            return Ok(String::new());
+        }
+        let (system, turns) = converse_messages(messages);
+        let full = crate::bedrock::converse(&self.region, &self.model_id, &system, &turns, max_tokens, temperature)?;
+        if !cancelled(cancel) {
+            on_token(&full);
+        }
+        Ok(full)
+    }
+}
+
+/// Same folding as the Anthropic API, in Converse content shapes.
+fn converse_messages(messages: &[ChatMessage]) -> (String, Vec<Value>) {
+    let mut system = String::new();
+    let mut turns: Vec<(String, String, Vec<String>)> = Vec::new();
+    for m in messages {
+        if m.role == "system" {
+            if !system.is_empty() {
+                system.push_str("\n\n");
+            }
+            system.push_str(&m.content);
+            continue;
+        }
+        let imgs = m.images.clone().unwrap_or_default();
+        match turns.last_mut() {
+            Some((role, content, images)) if *role == m.role => {
+                content.push_str("\n\n");
+                content.push_str(&m.content);
+                images.extend(imgs);
+            }
+            _ => turns.push((m.role.clone(), m.content.clone(), imgs)),
+        }
+    }
+    if turns.first().map(|(r, _, _)| r == "assistant").unwrap_or(false) {
+        turns.insert(0, ("user".into(), "(continuing)".into(), Vec::new()));
+    }
+    let turns = turns
+        .into_iter()
+        .map(|(role, content, images)| {
+            let mut blocks: Vec<Value> = images
+                .iter()
+                .filter_map(|d| {
+                    let (head, b64) = d.split_once(";base64,")?;
+                    let format = match head.strip_prefix("data:").unwrap_or("") {
+                        "image/jpeg" => "jpeg",
+                        "image/webp" => "webp",
+                        "image/gif" => "gif",
+                        _ => "png",
+                    };
+                    Some(json!({"image": {"format": format, "source": {"bytes": b64}}}))
+                })
+                .collect();
+            blocks.push(json!({"text": content}));
+            json!({"role": role, "content": blocks})
+        })
+        .collect();
+    (system, turns)
 }
 
 fn fmt_ureq(e: ureq::Error) -> String {

@@ -7,6 +7,7 @@
 //! one memory that outlives every process and every model.
 
 mod api;
+mod bedrock;
 mod journal;
 mod mcp;
 mod providers;

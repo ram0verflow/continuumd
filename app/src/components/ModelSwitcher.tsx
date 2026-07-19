@@ -56,7 +56,10 @@ export function ModelSwitcher({
     try {
       await sendJSON('PUT', '/v1/settings', { provider: m.provider, model: m.model })
       onSwitched()
+      setModels(await getJSON<ModelsResponse>('/v1/models'))
       setOpen(false)
+    } catch (e) {
+      alert(`switch failed: ${e}`)
     } finally {
       setSwitching('')
     }

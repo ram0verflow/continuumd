@@ -467,10 +467,33 @@ fn models(shared: &Arc<Shared>) -> Value {
         "note": "attention-state paging to disk", "available": llama_up,
         "needs": if llama_up { "" } else { "start llama-server on :8080" },
     }));
-    self_hosted.push(json!({
-        "provider": "bedrock", "model": "", "label": "AWS Bedrock",
-        "note": "on the roadmap", "available": false, "soon": true,
-    }));
+
+    // Claude through the user's own AWS account. Real inference profiles
+    // when the CLI session is live; an honest pointer when it is not.
+    let aws_ok = crate::bedrock::credentials().is_ok();
+    if aws_ok {
+        let region = crate::bedrock::default_region();
+        let profiles = crate::bedrock::list_claude_profiles(&region);
+        if profiles.is_empty() {
+            self_hosted.push(json!({
+                "provider": "bedrock", "model": "", "label": "AWS Bedrock",
+                "note": format!("no Claude inference profiles visible in {region}"),
+                "available": false,
+            }));
+        }
+        for id in profiles {
+            let short = id.trim_start_matches("us.").trim_start_matches("eu.").trim_start_matches("apac.");
+            self_hosted.push(json!({
+                "provider": "bedrock", "model": id, "label": format!("bedrock · {short}"),
+                "note": format!("your AWS account, {region}"), "available": true,
+            }));
+        }
+    } else {
+        self_hosted.push(json!({
+            "provider": "bedrock", "model": "", "label": "AWS Bedrock",
+            "note": "run `aws login` first", "available": false,
+        }));
+    }
 
     json!({
         "current": {"provider": s.provider, "model": s.model},
