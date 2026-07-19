@@ -117,12 +117,14 @@ fn list_claude_profiles_uncached(region: &str) -> Vec<String> {
         return Vec::new();
     }
     let Ok(v) = serde_json::from_slice::<Value>(&out.stdout) else { return Vec::new() };
+    // Chat-capable families only; upscalers and embedders don't converse.
+    const CHAT_FAMILIES: [&str; 5] = ["anthropic", "amazon.nova", "meta.llama", "mistral", "deepseek"];
     v["inferenceProfileSummaries"]
         .as_array()
         .map(|a| {
             a.iter()
                 .filter_map(|p| p["inferenceProfileId"].as_str())
-                .filter(|id| id.contains("anthropic"))
+                .filter(|id| CHAT_FAMILIES.iter().any(|f| id.contains(f)))
                 .map(String::from)
                 .collect()
         })
@@ -141,6 +143,9 @@ pub fn converse(
     let creds = credentials()?;
     let host = format!("bedrock-runtime.{region}.amazonaws.com");
     let path = format!("/model/{}/converse", uri_encode(model_id));
+    // SigV4 wants the canonical path segment-encoded TWICE for every service
+    // but S3: the wire carries %3A, the signature is computed over %253A.
+    let canonical_path = path.replace('%', "%25");
     let body = json!({
         "system": [{"text": system}],
         "messages": messages,
@@ -164,7 +169,7 @@ pub fn converse(
     let signed_header_list = header_names.join(";");
     let canonical_headers: String = signed_headers.iter().map(|(k, v)| format!("{k}:{}\n", v.trim())).collect();
 
-    let canonical_request = format!("POST\n{path}\n\n{canonical_headers}\n{signed_header_list}\n{payload_hash}");
+    let canonical_request = format!("POST\n{canonical_path}\n\n{canonical_headers}\n{signed_header_list}\n{payload_hash}");
     let scope = format!("{date}/{region}/bedrock/aws4_request");
     let string_to_sign = format!(
         "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
