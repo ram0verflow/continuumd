@@ -227,6 +227,30 @@ impl Kernel {
         }
     }
 
+    /// fault_block plus semantic expansion: union the lexical route with the
+    /// fault topic's pure dense neighbours, gate bypassed. For gaps the
+    /// model names in different words than the user spoke ("engineers
+    /// hired" vs "people on the platform team").
+    pub fn fault_block_semantic(&self, topic: &str, budget: usize) -> Option<String> {
+        let driver = self.drivers.first()?;
+        let embedding = self.ollama.embed(topic).unwrap_or_default();
+        let mut indices = driver.route_query(topic, &embedding);
+        for idx in driver.semantic_neighbors(&embedding, 8) {
+            if !indices.contains(&idx) {
+                indices.push(idx);
+            }
+        }
+        if indices.is_empty() {
+            return None;
+        }
+        let (body, _tokens) = driver.load_messages(&indices, budget);
+        if body.trim().is_empty() {
+            return None;
+        }
+        let ns = driver.namespace().trim_start_matches('/');
+        Some(format!("[MEMORY_BLOCK: /{ns}/{}]\n{body}", to_slug(topic)))
+    }
+
     pub fn prepare_fault_with(&self, topic: &str, user_msg: &str, session: &[ChatMessage], budget: usize, template: &str) -> Option<Vec<ChatMessage>> {
         let (context, _ns, _path, _n) = self.page_in(topic, budget);
         if context.trim().is_empty() {

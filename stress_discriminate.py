@@ -156,7 +156,9 @@ def main():
         stale = contains_any(reply, c["forbidden"]) and not ok
         results.append({"case": c["name"], "reply": reply, "ok": ok, "stale": stale,
                         "store_topics": insp.get("store_topics"),
-                        "loaded": insp.get("loaded")})
+                        "loaded": insp.get("loaded"),
+                        "actions": insp.get("actions"),
+                        "loop_trace": insp.get("loop_trace")})
         mark = "PASS" if ok else ("STALE" if stale else "FAIL")
         print(f"  [{mark:5}] st={insp.get('store_topics')} {c['name']:28} -> {reply[:70]!r}")
 

@@ -147,6 +147,10 @@ pub struct Settings {
     /// the stress harness it added no recall the driver index didn't already
     /// provide (see README). The toggle stays for future runs.
     pub store_context: bool,
+    /// Expand fault re-pages with pure dense neighbours of the fault topic
+    /// (gate bypassed). Exists because the model names gaps in its own
+    /// vocabulary and lexical routing searches the user's.
+    pub fault_semantic_expansion: bool,
 }
 
 impl Default for Settings {
@@ -167,6 +171,7 @@ impl Default for Settings {
             social_enabled: true,
             web_enabled: true,
             store_context: false,
+            fault_semantic_expansion: true,
         }
     }
 }

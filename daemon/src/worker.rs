@@ -91,6 +91,15 @@ fn protocol_request(reply: &str, prefix: &str) -> Option<String> {
     if line.is_empty() { None } else { Some(line) }
 }
 
+/// Has this turn already asked memory for the same gap, possibly worded
+/// differently? Reuses the identity guard's comparator at its threshold.
+/// Extracted so the dedup behaviour has a direct regression test.
+pub(crate) fn fault_already_asked(asked: &[String], topic: &str) -> bool {
+    asked.iter().any(|t| {
+        aios::kernel::token_overlap_pct(topic, t) >= 80 || aios::kernel::token_overlap_pct(t, topic) >= 80
+    })
+}
+
 /// True when a response opener is protocol traffic that must never reach
 /// the user's screen (the daemon handles it and regenerates).
 fn is_protocol(text: &str) -> bool {
@@ -365,19 +374,18 @@ impl Worker {
         // thing twice in different words.
         let mut fault_topics_asked: Vec<String> = Vec::new();
         let mut actions: Vec<Value> = Vec::new();
-        for _ in 0..4 {
+        let mut loop_trace: Vec<Value> = Vec::new();
+        for round in 0..4 {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
             let block = if let Some(topic) = detect_page_fault(&reply) {
                 if topic == "unknown" {
+                    loop_trace.push(json!({"round": round, "proto": "fault", "arg": topic, "outcome": "break: unnamed topic"}));
                     break; // soft refusal with no named topic: nothing to page
                 }
-                let already_asked = fault_topics_asked.iter().any(|t| {
-                    aios::kernel::token_overlap_pct(&topic, t) >= 80
-                        || aios::kernel::token_overlap_pct(t, &topic) >= 80
-                });
-                if already_asked {
+                if fault_already_asked(&fault_topics_asked, &topic) {
+                    loop_trace.push(json!({"round": round, "proto": "fault", "arg": topic, "outcome": "break: dedup, same gap re-asked"}));
                     break;
                 }
                 if !faulted {
@@ -386,24 +394,39 @@ impl Worker {
                 }
                 self.send(events, json!({"t": "fault", "topic": topic}));
                 fault_topics_asked.push(topic.clone());
-                match self.kernel.fault_block(&topic, meta.memory_budget_tokens) {
+                let paged = if s.fault_semantic_expansion {
+                    self.kernel.fault_block_semantic(&topic, meta.memory_budget_tokens)
+                } else {
+                    self.kernel.fault_block(&topic, meta.memory_budget_tokens)
+                };
+                match paged {
                     Some(b) => {
-                        actions.push(json!({"type": "repage", "topic": topic}));
+                        actions.push(json!({"type": "repage", "topic": topic, "semantic": s.fault_semantic_expansion}));
+                        loop_trace.push(json!({
+                            "round": round, "proto": "fault", "arg": topic,
+                            "outcome": format!("repage {} chars{}", b.len(), if s.fault_semantic_expansion { ", semantic" } else { "" }),
+                            "block_preview": b.chars().take(110).collect::<String>(),
+                        }));
                         format!(
                             "[ADDITIONAL MEMORY: {topic}]\n{b}\n\nUse this together with what \
                              was already loaded. If one specific needed fact is STILL missing, \
                              fault for exactly that fact; otherwise answer now."
                         )
                     }
-                    None => break, // nothing pages in: fall to the honest voice below
+                    None => {
+                        loop_trace.push(json!({"round": round, "proto": "fault", "arg": topic, "outcome": "break: nothing paged in"}));
+                        break; // nothing pages in: fall to the honest voice below
+                    }
                 }
             } else if let Some(expr) = protocol_request(&reply, "CALC_NEEDED:") {
                 if actions.iter().any(|a| a["expr"] == expr.as_str()) {
+                    loop_trace.push(json!({"round": round, "proto": "calc", "arg": expr, "outcome": "break: same expression re-asked"}));
                     break;
                 }
                 self.send(events, json!({"t": "tool", "name": "calc"}));
                 match crate::calc::eval(&expr) {
                     Ok(v) => {
+                        loop_trace.push(json!({"round": round, "proto": "calc", "arg": expr, "outcome": format!("= {v}")}));
                         actions.push(json!({"type": "calc", "expr": expr, "result": v.clone()}));
                         {
                             let mut j = self.shared.journal.lock().unwrap();
@@ -412,12 +435,14 @@ impl Worker {
                         format!("[CALC RESULT] {expr} = {v}\nUse this exact value in your answer.")
                     }
                     Err(e) => {
+                        loop_trace.push(json!({"round": round, "proto": "calc", "arg": expr, "outcome": format!("error: {e}")}));
                         actions.push(json!({"type": "calc", "expr": expr, "error": e.clone()}));
                         format!("[CALC ERROR] {e}\nState the calculation in words instead of guessing a number.")
                     }
                 }
             } else if let Some(query) = protocol_request(&reply, "WEB_NEEDED:") {
                 if !s.web_enabled {
+                    loop_trace.push(json!({"round": round, "proto": "web", "arg": query, "outcome": "break: web disabled"}));
                     break;
                 }
                 self.send(events, json!({"t": "web", "query": query}));
@@ -430,6 +455,7 @@ impl Worker {
                             let mut j = self.shared.journal.lock().unwrap();
                             j.append("web", &query, json!({"turn_id": id, "results": hits.len()}), incognito);
                         }
+                        loop_trace.push(json!({"round": round, "proto": "web", "arg": query, "outcome": format!("{} results", hits.len())}));
                         websearch::render_block(&query, &hits)
                     }
                     Err(e) => {
@@ -439,6 +465,7 @@ impl Worker {
                 }
             } else if let Some(rest) = protocol_request(&reply, "TOOL_NEEDED:") {
                 let Some((server_name, tool, args)) = mcp::parse_tool_request(&rest) else {
+                    loop_trace.push(json!({"round": round, "proto": "tool", "arg": rest, "outcome": "break: unparseable tool request"}));
                     break;
                 };
                 self.send(events, json!({"t": "tool", "name": format!("{server_name}.{tool}")}));
@@ -464,7 +491,7 @@ impl Worker {
                     }
                 }
             } else {
-                break;
+                break; // a real answer: the loop's job is done
             };
             messages.push(ChatMessage::new("assistant", reply.trim()));
             messages.push(ChatMessage::new("user", block));
@@ -484,6 +511,7 @@ impl Worker {
             };
             self.send(events, json!({"t": "tok", "v": reply.as_str()}));
         } else if is_protocol(&reply) {
+            loop_trace.push(json!({"proto": "wedge", "unresolved": reply.chars().take(160).collect::<String>()}));
             reply = "I tried to reach for outside help there and couldn't. Ask me again, or rephrase?".into();
             self.send(events, json!({"t": "tok", "v": reply.as_str()}));
         }
@@ -566,6 +594,7 @@ impl Worker {
             "provider": provider.label(),
             "writes": writes,
             "actions": actions,
+            "loop_trace": loop_trace,
             "cancelled": was_cancelled,
             "errored": errored,
             "privacy_mode": s.privacy_mode,
@@ -817,5 +846,24 @@ impl Worker {
             "last_turn": last_turn,
         });
         *self.shared.status.lock().unwrap() = snapshot;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fault_already_asked;
+
+    #[test]
+    fn fault_dedup_catches_the_same_gap_in_different_words() {
+        let asked = vec!["API plan monthly limit".to_string()];
+        // Same gap, reworded: suppressed.
+        assert!(fault_already_asked(&asked, "monthly limit of the API plan"));
+        assert!(fault_already_asked(&asked, "the API plan's monthly limit"));
+        // A genuinely different gap: allowed through, the chain may continue.
+        assert!(!fault_already_asked(&asked, "current API usage this month"));
+        assert!(!fault_already_asked(&asked, "dentist appointment date"));
+        // Second ask joins the set and is itself suppressed thereafter.
+        let asked = vec!["API plan monthly limit".into(), "current API usage this month".into()];
+        assert!(fault_already_asked(&asked, "this month's current usage of the API"));
     }
 }

@@ -21,7 +21,62 @@ pub fn eval(raw: &str) -> Result<String, String> {
     if let Some(out) = date_shift(expr) {
         return Ok(out);
     }
-    arith(expr).map(format_number)
+    arith(&normalize(expr)).map(format_number)
+}
+
+/// Models write "15 minus 12", "620 gigabytes - 140 gigabytes" and
+/// "15 (current headcount) - 12 (budgeted)". A strict parser turned each
+/// of those into a wasted action-loop round (observed burning three of
+/// four rounds on one turn), so word operators are translated,
+/// letter-bearing parentheticals are dropped, and stray unit words are
+/// stripped. Parentheses containing only math survive untouched.
+fn normalize(expr: &str) -> String {
+    let mut s = String::with_capacity(expr.len());
+    let mut chars = expr.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '(' {
+            let mut inner = String::new();
+            let mut depth = 1;
+            for d in chars.by_ref() {
+                if d == '(' {
+                    depth += 1;
+                } else if d == ')' {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                inner.push(d);
+            }
+            if inner.chars().any(|d| d.is_alphabetic()) {
+                continue; // annotation like "(current headcount)": drop it
+            }
+            s.push('(');
+            s.push_str(&inner);
+            s.push(')');
+        } else {
+            s.push(c);
+        }
+    }
+    // Word operators, then strip any remaining letter runs (unit words).
+    let lowered = s.to_lowercase();
+    let mut out = String::with_capacity(lowered.len());
+    for tok in lowered.split_whitespace() {
+        let t = tok.trim_matches(|c: char| c == ',' && false);
+        match t {
+            "plus" | "add" | "added" => out.push_str(" + "),
+            "minus" | "subtract" | "less" => out.push_str(" - "),
+            "times" | "multiplied" | "x" => out.push_str(" * "),
+            "divided" | "over" => out.push_str(" / "),
+            "by" => {} // "divided by", "multiplied by": the operator already landed
+            _ if t.chars().all(|c| c.is_alphabetic()) => {} // unit word: drop
+            _ => {
+                out.push(' ');
+                out.push_str(t);
+            }
+        }
+    }
+    out.trim().to_string()
 }
 
 // --- dates -----------------------------------------------------------------
@@ -204,6 +259,22 @@ mod tests {
         assert_eq!(eval("10 / 4").unwrap(), "2.50");
         assert!(eval("1 / 0").is_err());
         assert!(eval("what").is_err());
+    }
+
+    #[test]
+    fn model_shaped_expressions_from_the_probe_trace() {
+        // The exact three expressions that each burned an action-loop round.
+        assert_eq!(eval("15 (current headcount) - 12 (budgeted headcount)").unwrap(), "3");
+        assert_eq!(eval("15 minus 12").unwrap(), "3");
+        assert_eq!(eval("620 gigabytes - 140 gigabytes").unwrap(), "480");
+        // And relatives seen in earlier journals.
+        assert_eq!(eval("620 gigabytes - 140 gigabytes in gigabytes").unwrap(), "480");
+        assert_eq!(eval("1800 plus 200").unwrap(), "2000");
+        assert_eq!(eval("62000 divided by 2").unwrap(), "31000");
+        // Numeric parentheses still work after annotation stripping.
+        assert_eq!(eval("(3 + 4) * 2 (final)").unwrap(), "14");
+        // Pure words still refuse rather than guessing.
+        assert!(eval("current headcount minus budgeted headcount").is_err());
     }
 
     #[test]

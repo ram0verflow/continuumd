@@ -61,6 +61,15 @@ pub trait MemoryIndexDriver {
 
     /// Cap on how many messages one query may load. Default: not tunable.
     fn set_max_load(&mut self, _n: usize) {}
+
+    /// Pure dense nearest neighbours over every indexed message, bypassing
+    /// the candidate gate entirely. Exists for fault re-pages: the model
+    /// names a gap in its own vocabulary, and when that shares no tokens
+    /// with the stored mention, the lexical candidate pool never contains
+    /// the target for the dense scorer to find. Default: unsupported.
+    fn semantic_neighbors(&self, _embedding: &[f32], _k: usize) -> Vec<usize> {
+        Vec::new()
+    }
 }
 
 /// Type-safe partitioned tree (spec §4.2).

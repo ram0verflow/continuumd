@@ -172,7 +172,8 @@ def main():
                         "store_topics": insp.get("store_topics"),
                         "loaded": insp.get("loaded"),
                         "faulted": insp.get("faulted"),
-                        "actions": insp.get("actions")})
+                        "actions": insp.get("actions"),
+                        "loop_trace": insp.get("loop_trace")})
         print(f"  [{'PASS' if ok else 'FAIL'}] st={insp.get('store_topics')} "
               f"{c['name']:18} -> {reply[:66]!r}")
 

@@ -512,6 +512,20 @@ impl MemoryIndexDriver for HierarchicalTopicDriver {
         self.route_cfg.max_load = n.max(1);
     }
 
+    fn semantic_neighbors(&self, embedding: &[f32], k: usize) -> Vec<usize> {
+        if embedding.is_empty() {
+            return Vec::new();
+        }
+        let mut scored: Vec<(f32, usize)> = self
+            .messages
+            .iter()
+            .filter_map(|m| m.embedding.as_ref().map(|e| (cosine(embedding, e), m.idx)))
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+        scored.into_iter().map(|(_, i)| i).collect()
+    }
+
     fn persist(&self, path: &str) -> std::io::Result<()> {
         self.save(path)
     }
