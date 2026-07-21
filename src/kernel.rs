@@ -82,6 +82,8 @@ pub struct Kernel {
     kv: Option<crate::llamaserver::LlamaServer>,
     drivers: Vec<Box<dyn MemoryIndexDriver>>,
     identity: String,
+    /// When true, base retrieval unions in the entity-graph route (#14).
+    entity_routing: bool,
     /// Optional per-turn block of store content (topic summaries and
     /// current facts) to page in alongside the driver's messages. Empty
     /// means the store stays out of the prompt, which was the only
@@ -91,7 +93,7 @@ pub struct Kernel {
 
 impl Kernel {
     pub fn new(ollama: Ollama, config: KernelConfig) -> Self {
-        Kernel { config, ollama, kv: None, drivers: Vec::new(), identity: String::new(), store_block: String::new() }
+        Kernel { config, ollama, kv: None, drivers: Vec::new(), identity: String::new(), entity_routing: false, store_block: String::new() }
     }
 
     /// Mount the KV-paging inference backend.
@@ -134,6 +136,11 @@ impl Kernel {
         self.identity = identity.to_string();
     }
 
+    /// Toggle entity-graph base retrieval for subsequent turns.
+    pub fn set_entity_routing(&mut self, on: bool) {
+        self.entity_routing = on;
+    }
+
     /// Set (or clear, with "") the store content paged in for the next turn.
     pub fn set_store_block(&mut self, block: &str) {
         self.store_block = block.to_string();
@@ -155,7 +162,17 @@ impl Kernel {
             return (String::new(), String::new(), "no driver".into(), 0);
         };
         let embedding = self.ollama.embed(topic).unwrap_or_default();
-        let indices = driver.route_query(topic, &embedding);
+        // Entity routing REPLACES the lexical base route (not unions), because
+        // a union cannot fix precision: the point of #14 is that the graph
+        // selects a cleaner set, not a larger one. Fall back to the lexical
+        // route only when the graph resolves nothing, so unrelated queries
+        // still work.
+        let indices = if self.entity_routing {
+            let e = driver.entity_route(topic);
+            if e.is_empty() { driver.route_query(topic, &embedding) } else { e }
+        } else {
+            driver.route_query(topic, &embedding)
+        };
         let (body, _tokens) = driver.load_messages(&indices, budget);
         let ns = driver.namespace().trim_start_matches('/');
         let topic_key = to_slug(topic);
@@ -533,7 +550,7 @@ impl Kernel {
 /// gigabytes on the basic tier" -> {basic, tier}. The unit-word exclusion
 /// is the whole point: it is what would let "gigabytes" stop bridging the
 /// drive and storage-tier facts.
-fn content_entities(s: &str) -> std::collections::HashSet<String> {
+pub(crate) fn content_entities(s: &str) -> std::collections::HashSet<String> {
     const STOP: &[&str] = &[
         "this", "that", "these", "those", "with", "have", "about", "your", "mine",
         "current", "currently", "much", "many", "some", "into", "from", "what", "which",

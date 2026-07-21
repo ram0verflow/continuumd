@@ -169,6 +169,9 @@ pub struct Settings {
     /// of the graph in #14). Probe knob: does it stop the drive/storage
     /// bleed without also killing the eng-headcount fix.
     pub fault_scope_entities: bool,
+    /// Base retrieval by the entity graph instead of the lexical route (#14):
+    /// resolve the query's entities to nodes and load their messages.
+    pub entity_routing: bool,
 }
 
 impl Default for Settings {
@@ -191,6 +194,7 @@ impl Default for Settings {
             store_context: false,
             fault_semantic_expansion: true,
             fault_scope_entities: false,
+            entity_routing: false,
         }
     }
 }

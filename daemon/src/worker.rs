@@ -305,6 +305,7 @@ impl Worker {
         // Identity always rides along; the store owns it.
         let identity = self.shared.store.lock().unwrap().get_identity().to_string();
         self.kernel.set_identity(&identity);
+        self.kernel.set_entity_routing(s.entity_routing);
 
         // The store-into-context experiment: page query-relevant topics
         // (summary + current facts, latest values only) in alongside the
