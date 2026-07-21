@@ -538,6 +538,36 @@ assertion. One run per condition here; the drive result is a single run, but
 the mechanism is legible in the loaded counts rather than inferred from the
 score.
 
+That last hedge turned out to matter, and the paragraph above needs a
+correction that is worth keeping visible rather than editing away. Re-running
+the conditions, the verdicts flipped: the drive case passed under the lexical
+baseline in one run and failed in the next on identical retrieval, and the
+graph that had "fixed" drive now bled the 140. The judge-graded end-to-end was
+noise dominated, the model and the grader together vary more than the effect
+being measured, and the confident precision claim was a single lucky run. So
+the model and the judge got cut out entirely and retrieval composition was
+measured directly, which is deterministic. That probe is the real result.
+
+It says two things, both firmer than anything the end-to-end runs supported.
+The lexical route loads all fourteen planted facts on every query, because the
+corpus is small enough that it never has to select, so the conflation is not
+retrieval pulling in a wrong number, it is the model handed every number and
+picking the wrong pair about half the time. And entity routing reaches only
+one of the two facts each synthesis question needs, drive's 500 but not its
+620, the engineers' 12 but not the platform team's 15, so its apparent
+precision is empty because it drops the fact the question needs along with the
+distractor. The exact shape of the failure: for the drive question the storage
+tier's 140 is the third nearest entity in the whole store while the drive's
+own 620 fact sits past rank thirty-five, so the wrong number is ten times
+nearer than the right one and no threshold separates them. For disjoint
+synthesis, embedding proximity is anti-correlated with relevance, and the cheap
+graph does not earn the build, not for want of tuning but because the premise
+that nearness tracks relevance is false here. Two process lessons fall out:
+n=1 with a generative model and an LLM judge cannot resolve effects this size,
+and a harness small enough that lexical loads everything cannot test precision
+at all. The deterministic probe is the instrument that should have been built
+first.
+
 So the cheapest counter to that finding got built and measured before
 any graph work: fault re-pages can now union in the fault topic's pure
 dense neighbours, candidate gate bypassed, behind a setting. The trace
