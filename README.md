@@ -457,6 +457,46 @@ the photo library's 620 because both mention gigabytes. Reachability by
 vocabulary is too blunt in both directions at once, it misses what is
 phrased differently and conflates what is phrased alike.
 
+The cheapest counter to the conflation half, entity scoping, was built and
+measured next, and it failed in a way that is more informative than a
+success would have been. The idea: gate the semantic expansion so a
+neighbour is kept only if it shares a content entity (a token that is not a
+stopword, a unit word, or a number) with the fault topic, so that
+"gigabytes" alone cannot bridge the drive fact and the storage tier fact.
+A unit test settles the theory before any model runs: the drive fault
+shares no content entity with the storage 140 fact, so scoping would
+correctly drop it, but the engineers fault also shares no content entity
+with the "platform team" fact, so scoping would drop that too. Both needed
+facts are disjoint from their fault in the identical way. A lexical filter
+that fixes the conflation necessarily breaks the reach; it cannot tell the
+two apart because lexically they are the same situation.
+
+Then the measurement said something the theory had not. Isolating the drive
+case with only expansion toggled, expansion off answers correctly (620
+against 500, will not fit) and expansion on pulls the storage 140 into a
+620 minus 140 calculation and concludes it fits: expansion is the sole
+cause of the bleed when the transcript is sparse. But in the fuller
+transcript with three facts competing, the trace shows no page fault at
+all, only a calculation over 620 and 140. The model never faulted, because
+base retrieval on the original question had already placed the storage 140
+in the working set next to the drive numbers, and three plausible gigabyte
+figures are enough for it to pick a wrong pair and compute with confidence.
+The bleed there is upstream of the entire fault, expansion, and scope
+machinery, so scoping the expansion changes nothing: there is nothing to
+scope.
+
+Two things fall out of that. The bleed has a density dependent entry point,
+expansion in the sparse case and base retrieval in the dense one, so a fix
+that only touches fault time cannot cover it. And more fundamentally,
+conflation is invisible to the fault protocol: the whole design rests on
+the model knowing when it is missing something, and a wrong-but-plausible
+number handed over by retrieval is exactly the case where it does not know.
+This is the same shape as the silent staleness in the date case. The fix
+these point to is not a token filter and not a wider net but an entity
+scoped base retrieval where "platform team" and "engineers" are linked and
+"storage tier" and "drive" are not, which is the semantic entity graph in
+the issue tracker, and nothing cheaper reaches it.
+
 So the cheapest counter to that finding got built and measured before
 any graph work: fault re-pages can now union in the fault topic's pure
 dense neighbours, candidate gate bypassed, behind a setting. The trace
