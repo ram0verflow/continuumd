@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Endurance run against a live `aios serve` instance.
+"""Endurance run against a live `continuum serve` instance.
 
 The claim under test: the context window never dies. Facts planted in the
 first twenty turns must survive a hundred turns of unrelated chatter on a

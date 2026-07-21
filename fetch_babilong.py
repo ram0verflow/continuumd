@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Fetch a BABILong slice for the aios runner.
+"""Fetch a BABILong slice for the continuum runner.
 
 BABILong hides bAbI facts inside long book text. It is a second benchmark
-family for aios: the haystack is far bigger than the model window, so the
+family for continuum: the haystack is far bigger than the model window, so the
 system has to find the needles by retrieval, which is exactly the claim.
 
 Writes data/babilong_<len>.jsonl with one {task, input, question, target}

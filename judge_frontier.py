@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Frontier-judge for LoCoMo predictions (eval-hygiene fix: external grader).
 
-Reads OPENAI_API_KEY or ANTHROPIC_API_KEY from aios-rs/.env (KEY=value lines)
+Reads OPENAI_API_KEY or ANTHROPIC_API_KEY from the repo .env (KEY=value lines)
 or the environment. Judges every prediction JSONL given on the command line.
 
 Two judging modes per record:
