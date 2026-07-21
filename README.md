@@ -497,6 +497,47 @@ scoped base retrieval where "platform team" and "engineers" are linked and
 "storage tier" and "drive" are not, which is the semantic entity graph in
 the issue tracker, and nothing cheaper reaches it.
 
+So the minimal version of that graph got built and measured, and the result
+is the most useful kind of negative. At ingest each message attaches to its
+content entities (units and numbers dropped) and each entity is embedded
+once; base retrieval resolves a question's entities to the nearest entity
+nodes and loads the messages hanging off them, replacing the lexical route
+rather than adding to it. Against the lexical base on the eight disjoint
+cases, with fault expansion off so the only variable is the base index, the
+graph went four of eight against five, one worse. But the two cases that
+moved tell the whole story. The drive question, which lexical retrieval got
+wrong by pulling the storage tier's 140 into a 620 minus 140, the graph got
+right: it loaded fifteen messages instead of thirty, the 140 was not among
+them, and it answered 620 against 500, will not fit. The precision half of
+the thesis is real and the mechanism is exactly the predicted one: the 140
+message's only content entity is the vague "keeping", so it hangs off an
+orphan node a drive query never reaches.
+
+The same orphaning is why the graph lost. The 140 that is a distractor to
+the drive question is the answer to the storage tier question, and being
+orphaned from everything it is now unreachable by the one question that
+needs it, so storage tier went from pass to fail. Reach failed the same way
+for the cases that need a cross vocabulary hop: "battery" did not resolve to
+the laptop's charge fact and "engineering" did not resolve to the platform
+team, because the only link on offer was raw embedding similarity between a
+query word and an entity string, which is too weak across vocabulary and too
+blunt across unit words, the identical failure in a new place.
+
+The verdict is precise rather than a shrug. The cheap graph does not earn the
+full build, it trades precision for reach and nets slightly worse. But it is
+not a null result: it confirms the precision mechanism works and it localizes
+the two things the shortcut left out, both load bearing. Extraction has to be
+coreference aware, so "140 gigabytes up there" attaches to storage rather than
+to "keeping". And entities need edges to each other, learned from
+co-occurrence, so "engineers" and "platform team" become one reachable thing
+without either sharing a word, which is the association graph and its cold
+start problem exactly as the prior work warned. The next measurable step is
+those edges, on this same harness. That is what decides the full build, and
+the shortcut around it is now closed off with evidence rather than by
+assertion. One run per condition here; the drive result is a single run, but
+the mechanism is legible in the loaded counts rather than inferred from the
+score.
+
 So the cheapest counter to that finding got built and measured before
 any graph work: fault re-pages can now union in the fault topic's pure
 dense neighbours, candidate gate bypassed, behind a setting. The trace
