@@ -362,6 +362,21 @@ impl HierarchicalTopicDriver {
     /// Online ingestion of one turn: embed, index, grow the topic tree.
     /// No LLM in this path, routing is embeddings + keywords + continuity.
     /// Returns the assigned message idx.
+    /// Debug: the query's extracted entities and the top-k scored entity
+    /// nodes (name, best cosine to any query entity). For the probe only.
+    pub fn debug_entity_scores(&self, query: &str, k: usize) -> (Vec<String>, Vec<(String, f32)>) {
+        let ents: Vec<String> = crate::kernel::content_entities(query).into_iter().collect();
+        let Some(ol) = &self.embedder else { return (ents, Vec::new()) };
+        let q_vecs: Vec<Vec<f32>> = ents.iter().filter_map(|e| ol.embed(e).ok()).collect();
+        let mut scored: Vec<(String, f32)> = self.entity_emb.iter().map(|(name, v)| {
+            let s = q_vecs.iter().map(|qv| cosine(qv, v)).fold(0.0f32, f32::max);
+            (name.clone(), s)
+        }).collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+        (ents, scored)
+    }
+
     /// Attach a message to the entity nodes it mentions, embedding each new
     /// entity once. Deterministic and LLM-free (the embed call aside): the
     /// entity set comes from `content_entities`, so units and numbers are
