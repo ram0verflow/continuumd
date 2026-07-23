@@ -82,10 +82,6 @@ pub struct Kernel {
     kv: Option<crate::llamaserver::LlamaServer>,
     drivers: Vec<Box<dyn MemoryIndexDriver>>,
     identity: String,
-    /// When true, base retrieval unions in the entity-graph route (#14).
-    entity_routing: bool,
-    /// When true, the entity route also walks one co-occurrence hop (#15).
-    entity_edges: bool,
     /// Optional per-turn block of store content (topic summaries and
     /// current facts) to page in alongside the driver's messages. Empty
     /// means the store stays out of the prompt, which was the only
@@ -95,7 +91,7 @@ pub struct Kernel {
 
 impl Kernel {
     pub fn new(ollama: Ollama, config: KernelConfig) -> Self {
-        Kernel { config, ollama, kv: None, drivers: Vec::new(), identity: String::new(), entity_routing: false, entity_edges: false, store_block: String::new() }
+        Kernel { config, ollama, kv: None, drivers: Vec::new(), identity: String::new(), store_block: String::new() }
     }
 
     /// Mount the KV-paging inference backend.
@@ -138,16 +134,6 @@ impl Kernel {
         self.identity = identity.to_string();
     }
 
-    /// Toggle entity-graph base retrieval for subsequent turns.
-    pub fn set_entity_routing(&mut self, on: bool) {
-        self.entity_routing = on;
-    }
-
-    /// Toggle one-hop co-occurrence edge walking on the entity route.
-    pub fn set_entity_edges(&mut self, on: bool) {
-        self.entity_edges = on;
-    }
-
     /// Set (or clear, with "") the store content paged in for the next turn.
     pub fn set_store_block(&mut self, block: &str) {
         self.store_block = block.to_string();
@@ -169,17 +155,7 @@ impl Kernel {
             return (String::new(), String::new(), "no driver".into(), 0);
         };
         let embedding = self.ollama.embed(topic).unwrap_or_default();
-        // Entity routing REPLACES the lexical base route (not unions), because
-        // a union cannot fix precision: the point of #14 is that the graph
-        // selects a cleaner set, not a larger one. Fall back to the lexical
-        // route only when the graph resolves nothing, so unrelated queries
-        // still work.
-        let indices = if self.entity_routing {
-            let e = driver.entity_route(topic, self.entity_edges);
-            if e.is_empty() { driver.route_query(topic, &embedding) } else { e }
-        } else {
-            driver.route_query(topic, &embedding)
-        };
+        let indices = driver.route_query(topic, &embedding);
         let (body, _tokens) = driver.load_messages(&indices, budget);
         let ns = driver.namespace().trim_start_matches('/');
         let topic_key = to_slug(topic);
@@ -255,33 +231,14 @@ impl Kernel {
     /// fault topic's pure dense neighbours, gate bypassed. For gaps the
     /// model names in different words than the user spoke ("engineers
     /// hired" vs "people on the platform team").
-    ///
-    /// `scope_entities` gates the dense neighbours: a neighbour is kept only
-    /// if it shares a content entity (a non-stopword, non-unit, non-numeric
-    /// token) with the fault topic. This is the cheap, lexical form of the
-    /// graph in #14, and it exists to measure the eng/drive tension: it
-    /// should exclude the storage-tier "140 gigabytes" from a drive fault
-    /// (no shared content word) while probably also excluding the platform
-    /// team from an engineers fault (also no shared content word), which is
-    /// the whole question.
-    pub fn fault_block_semantic(&self, topic: &str, budget: usize, scope_entities: bool) -> Option<String> {
+    pub fn fault_block_semantic(&self, topic: &str, budget: usize) -> Option<String> {
         let driver = self.drivers.first()?;
         let embedding = self.ollama.embed(topic).unwrap_or_default();
         let mut indices = driver.route_query(topic, &embedding);
-        let topic_entities = content_entities(topic);
         for idx in driver.semantic_neighbors(&embedding, 8) {
-            if indices.contains(&idx) {
-                continue;
+            if !indices.contains(&idx) {
+                indices.push(idx);
             }
-            if scope_entities {
-                if let Some((_, text, _)) = driver.get_message(idx) {
-                    let shares = content_entities(&text).iter().any(|e| topic_entities.contains(e));
-                    if !shares {
-                        continue; // dense-near but shares no content entity: skip
-                    }
-                }
-            }
-            indices.push(idx);
         }
         if indices.is_empty() {
             return None;
@@ -551,32 +508,6 @@ impl Kernel {
     }
 }
 
-/// Content entities of a phrase: lowercase tokens longer than three chars,
-/// minus stopwords, unit words, and pure numbers. "current number of
-/// engineers hired this year" -> {number, engineers, hired, year}; "140
-/// gigabytes on the basic tier" -> {basic, tier}. The unit-word exclusion
-/// is the whole point: it is what would let "gigabytes" stop bridging the
-/// drive and storage-tier facts.
-pub(crate) fn content_entities(s: &str) -> std::collections::HashSet<String> {
-    const STOP: &[&str] = &[
-        "this", "that", "these", "those", "with", "have", "about", "your", "mine",
-        "current", "currently", "much", "many", "some", "into", "from", "what", "which",
-        "will", "does", "over", "under", "more", "less", "than", "then", "here", "there",
-    ];
-    const UNITS: &[&str] = &[
-        "gigabyte", "gigabytes", "byte", "bytes", "hour", "hours", "minute", "minutes",
-        "thousand", "million", "dollar", "dollars", "call", "calls", "request", "requests",
-        "day", "days", "week", "weeks", "month", "months", "year", "years",
-    ];
-    s.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| t.len() > 3)
-        .filter(|t| !t.chars().all(|c| c.is_ascii_digit()))
-        .filter(|t| !STOP.contains(t) && !UNITS.contains(t))
-        .map(String::from)
-        .collect()
-}
-
 /// What share of `a`'s informative tokens (lowercase, alphanumeric, longer
 /// than three chars) also appear in `b`. 0 when `a` has none. Public so
 /// surfaces that need "same thing, different words" (the daemon's fault
@@ -752,23 +683,5 @@ mod tests {
     fn slug_is_namespace_safe() {
         assert_eq!(to_slug("Adoption Journey!"), "adoption_journey");
         assert_eq!(to_slug("When did Caroline go?"), "when_did_caroline_go");
-    }
-}
-
-#[cfg(test)]
-mod scope_tests {
-    use super::content_entities;
-    #[test]
-    fn unit_words_do_not_bridge_drive_and_storage() {
-        // Drive fault vs storage-tier fact: no shared content entity, so the
-        // scope filter would correctly exclude the 140.
-        let drive = content_entities("space left on the external drive for the backup");
-        let storage = content_entities("140 gigabytes on the basic tier");
-        assert!(drive.intersection(&storage).next().is_none(), "drive {drive:?} storage {storage:?}");
-        // Eng fault vs platform-team fact: ALSO no shared content entity, which
-        // is the tension: lexical scoping that fixes drive also breaks eng.
-        let eng = content_entities("number of engineers hired this year");
-        let team = content_entities("15 people on the platform team");
-        assert!(eng.intersection(&team).next().is_none(), "eng {eng:?} team {team:?}");
     }
 }

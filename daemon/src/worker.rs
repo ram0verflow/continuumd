@@ -305,8 +305,6 @@ impl Worker {
         // Identity always rides along; the store owns it.
         let identity = self.shared.store.lock().unwrap().get_identity().to_string();
         self.kernel.set_identity(&identity);
-        self.kernel.set_entity_routing(s.entity_routing);
-        self.kernel.set_entity_edges(s.entity_edges);
 
         // The store-into-context experiment: page query-relevant topics
         // (summary + current facts, latest values only) in alongside the
@@ -397,7 +395,7 @@ impl Worker {
                 self.send(events, json!({"t": "fault", "topic": topic}));
                 fault_topics_asked.push(topic.clone());
                 let paged = if s.fault_semantic_expansion {
-                    self.kernel.fault_block_semantic(&topic, meta.memory_budget_tokens, s.fault_scope_entities)
+                    self.kernel.fault_block_semantic(&topic, meta.memory_budget_tokens)
                 } else {
                     self.kernel.fault_block(&topic, meta.memory_budget_tokens)
                 };

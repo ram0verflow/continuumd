@@ -62,12 +62,6 @@ pub trait MemoryIndexDriver {
     /// Cap on how many messages one query may load. Default: not tunable.
     fn set_max_load(&mut self, _n: usize) {}
 
-    /// Base retrieval by entity graph (issue #14): resolve the query's
-    /// entities to nodes and return the messages they carry. When
-    /// `walk_edges` is set, also follow one co-occurrence hop (#15).
-    /// Default: none.
-    fn entity_route(&self, _query: &str, _walk_edges: bool) -> Vec<usize> { Vec::new() }
-
     /// Pure dense nearest neighbours over every indexed message, bypassing
     /// the candidate gate entirely. Exists for fault re-pages: the model
     /// names a gap in its own vocabulary, and when that shares no tokens

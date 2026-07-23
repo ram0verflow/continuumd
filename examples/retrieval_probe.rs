@@ -1,13 +1,14 @@
-//! Deterministic retrieval-composition probe (issues #14/#15/#24).
+//! Deterministic retrieval-composition probe (issues #14/#24).
 //!
 //! The judge-graded end-to-end run is dominated by model + judge variance at
-//! n=1: the same retrieval set yields PASS or FAIL run to run. But the graph's
-//! actual claim is about *what gets retrieved*, which is deterministic. This
-//! probe cuts out the model entirely and asks, for the crux queries: what does
-//! the lexical route load, what does the entity route load, what does the
-//! entity route with one co-occurrence hop load, and — the questions that
-//! matter — is the storage-tier 140 present in the DRIVE query (the precision
-//! bleed), and is the platform-team fact present in the ENG query (the reach)?
+//! n=1: the same retrieval set yields PASS or FAIL run to run. What retrieval
+//! actually loads, by contrast, is deterministic. This probe cuts out the model
+//! entirely and asks, for the crux queries: which planted facts does the
+//! lexical route load, are both operands a synthesis question needs present,
+//! and does the storage-tier 140 bleed into the DRIVE query?
+//!
+//! The entity-graph columns this probe once compared are gone with the code
+//! they measured; that experiment is settled and recorded in FINDINGS.md.
 //!
 //! Run: `cargo run --release --example retrieval_probe` (needs Ollama up with
 //! nomic-embed-text). It ingests the exact disjoint transcript.
@@ -72,31 +73,12 @@ fn main() {
         v
     };
 
-    // Debug: for the drive query, dump the top entity-node scores so we can
-    // see whether the "drive" node resolves as it must (cos ~1.0) or not.
-    {
-        let q = "will the backup fit on the drive?";
-        let (ents, scores) = d.debug_entity_scores(q, 200);
-        println!("DEBUG drive query entities: {ents:?}");
-        // The decisive comparison: how close is the storage-tier distractor
-        // ("keeping" -> the 140) versus the drive's OWN second fact
-        // ("library"/"photo"/"weighs" -> the 620 it needs)?
-        for target in ["drive", "keeping", "library", "photo", "weighs", "external", "holds"] {
-            if let Some((_, s)) = scores.iter().find(|(n, _)| n == target) {
-                let rank = scores.iter().position(|(n, _)| n == target).unwrap();
-                println!("   {s:.3}  (rank {rank:>2})  {target}");
-            }
-        }
-    }
-
     for (q, want, avoid) in QUERIES {
         let emb = ol.embed(q).unwrap_or_default();
         let lex = d.route_query(q, &emb);
-        let ent = d.entity_route(q, false);
-        let edg = d.entity_route(q, true);
         println!("\nQ: {q}");
         println!("  want reached: {want}.a/{want}.b   must NOT bleed: {}", if avoid.is_empty() { "-" } else { avoid });
-        for (tag, idxs) in [("lexical    ", &lex), ("entity     ", &ent), ("entity+edge", &edg)] {
+        for (tag, idxs) in [("lexical", &lex)] {
             let ls = labels(idxs);
             let reached = ls.iter().any(|l| l.starts_with(want));
             let reached_both = ls.contains(&format!("{want}.a")) && ls.contains(&format!("{want}.b"));
