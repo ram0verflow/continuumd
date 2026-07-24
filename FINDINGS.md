@@ -893,3 +893,69 @@ binary did not change what the system does. Two conversations had to be
 repaired first: conv3 was truncated at 141 of 199 by an earlier process kill,
 and conv9 was still in flight, so per-conversation record counts were checked
 against the original run before grading rather than after.
+
+### Annotation, built and first measured: a regression, and a false pass hiding inside a pass
+
+The precision half got built. Every quantity in the working set now carries what
+it belongs to and when it was stated, inline under the message it came from,
+sourced only from the message's own words and its timestamp. Where one entity
+carries several distinct values a timeline renders the sequence instead of the
+retrieval layer silently picking one.
+
+The literal text the model receives, drive case:
+
+```
+[9:15 am on 2 March, 2023] user: The external drive holds 500 gigabytes.
+    ^ 500 gigabytes — external drive, stated 2 March 2023
+[10:02 am on 3 March, 2023] user: I'm currently keeping 140 gigabytes up there.
+    ^ 140 gigabytes — keeping, stated 3 March 2023
+[10:05 am on 3 March, 2023] user: The basic tier caps at 100 gigabytes.
+    ^ 100 gigabytes — basic tier, stated 3 March 2023
+[6:40 pm on 12 August, 2023] user: My photo library weighs in at 620 gigabytes.
+    ^ 620 gigabytes — photo library, stated 12 August 2023
+```
+
+Two limits are visible in that block and neither is papered over. The 140 line
+degrades to "keeping" because the message says "up there" and never names its
+entity; "storage tier" lives in a different message, and binding them is
+cross-message coreference, not bookkeeping. And the block costs 73 tokens
+without annotation against 129 with it, a 77% increase, which spends budget in
+exactly the currency the 30 message cap earns, the largest single win in the
+project.
+
+**The regression guard says the trade is currently bad.** Five discriminate
+cases, llama 3.1 8B, annotation off then on, with the setting read back from the
+API per arm so "the flag was on" is evidence rather than assumption:
+
+| case | annotate off | annotate on |
+|---|---|---|
+| synthesis: date shift | pass | pass |
+| synthesis: arithmetic | pass | pass |
+| current-vs-ever: editor | pass | pass (see below) |
+| current-vs-ever: standup | pass | pass |
+| cross-branch: over allowance | pass | **fail** |
+| total | 5/5 | 4/5 |
+
+The failure is not a near miss. Asked whether it was over its API allowance, the
+annotated run answered a different question entirely, listing the dentist date,
+the rent and the editor, and never addressing the allowance at all. The shape
+suggests the doubled context pushed the model into summarising the working set
+rather than answering, which is the needle-dilution failure the cap exists to
+prevent, reappearing through a different door.
+
+Worse, one of the passes is not a pass. Under annotation the editor question,
+whose correct answer is "zed", was answered: *"You've settled on Neovim (often
+affectionately referred to as 'zed') as your primary editor for good."* That is
+a confabulation that invents a false synonym, and it scored as a pass only
+because the substring "zed" appears in it. Same grader failure class as #23. So
+of the two contradiction chains the guard exists to protect, one is held
+genuinely and the other is held only by the grader's charity.
+
+Verdict for now: annotation as built does not pay for itself on this evidence.
+It costs 77% more context, regresses the composition case outright, and its
+apparent preservation of the contradiction chains is partly an artifact of
+substring grading. This is n of 1 on an 8B model, which is exactly the sample
+size this log has been burned by repeatedly, so it is a signal to measure
+properly rather than a verdict to build on. But it is a negative signal, and the
+paired hypothesis (that annotation supplies the precision ungating costs) cannot
+be assumed to survive contact with a real context budget.
