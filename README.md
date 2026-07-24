@@ -20,6 +20,11 @@ LoCoMo benchmark, 10 conversations, 1542 answerable and 444 unanswerable questio
 | mem0 (OSS, local) | 31.0% | 80.5% |
 | continuum | 54.3% | 41.7% |
 | continuum + fine tune (conv 0 only) | 55.9% | 55.3% |
+| continuum, Nova Pro as answer model | 54.5% | 61.7% |
+
+The Nova Pro row varies only the answer model: same retrieval, same 30 message cap, same prompts, same judge. Answerable accuracy does not move (54.5 against 54.3 over more than 1500 questions), while refusal discipline moves 20 points. On this benchmark the binding constraint is what retrieval puts in the window, not the model reading it, which is also why any system's headline LoCoMo number should not be read as a property of its memory layer. That row includes 44 Bedrock transport failures (2.9%) scored as misses. Before it was allowed here, llama 3.1 8B was re-run through the same new code path and reproduced 54.2% against the original 54.3%, so the plumbing is not what moved anything.
+
+A second, harder benchmark is reported in [FINDINGS.md](FINDINGS.md) rather than here: LongMemEval, per category, where both llama 3.1 8B and Nova Pro score around 30 of 100. Those numbers need their caveat attached to mean anything, because roughly half the answers are unresolved page-fault lines rather than wrong answers, so they are kept next to that explanation.
 
 The fine tuned row is conv 0 only because the tune trained on the other nine. On that same held out conversation the untuned model gets 48.0% and refuses 25.5%, so the tune helped both numbers.
 

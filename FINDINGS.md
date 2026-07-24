@@ -874,3 +874,22 @@ rate is not a side metric for the paired experiment, it is the central one, and
 the reach half (`--ungate`) targets exactly the mechanism that is failing here.
 The calc question is unanswered and needs the action loop implemented in the
 harness before it can be asked again.
+
+### The reproduction gate passed, so the Nova numbers are allowed to count
+
+The `--provider` plumbing sits between every earlier number and every later one,
+so llama 3.1 8B was re-run through the new code path before any Nova result was
+quoted anywhere. Deduplicated (the first grading attempt died on a DNS failure
+and left partial `.judged.jsonl` files that a careless glob double-counted into
+a fake 1925-question denominator):
+
+| | new code path | original run | delta |
+|---|---|---|---|
+| answerable | 835/1540 (54.2%) | 54.3% | -0.1 points |
+| adversarial refused | 190/444 (42.8%) | 41.7% | +1.1 points |
+
+Adding a completion override to the kernel and a provider switch to the eval
+binary did not change what the system does. Two conversations had to be
+repaired first: conv3 was truncated at 141 of 199 by an earlier process kill,
+and conv9 was still in flight, so per-conversation record counts were checked
+against the original run before grading rather than after.
