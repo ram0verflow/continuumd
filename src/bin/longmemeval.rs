@@ -161,8 +161,16 @@ fn main() {
             // route page_in will take (same embedding, same route_query) purely
             // to see which evidence turns could have reached the model. This
             // does not change what the model is shown.
+            // Flags must be set BEFORE the route is computed: the structural
+            // pass measures this exact route, so setting them later silently
+            // measured the baseline and made --ungate look like a no-op.
+            d.route_cfg.ungate_dense = ungate;
+            d.route_cfg.annotate_values = annotate;
             let q_emb = ollama.embed(question).unwrap_or_default();
             let routed = d.route_query(question, &q_emb);
+            // Capture the driver's routing trace so --ungate is auditable in
+            // the output rather than assumed to have taken effect.
+            let route_trace = d.last_path.borrow().clone();
             let ev_total = evidence.len();
             let ev_loaded = evidence.iter().filter(|(i, _)| routed.contains(i)).count();
             let ev_sessions_total: std::collections::BTreeSet<usize> =
@@ -176,9 +184,7 @@ fn main() {
             let (pred, faulted, loaded) = if structural_only {
                 (String::new(), false, routed.len())
             } else {
-                d.route_cfg.ungate_dense = ungate;
-            d.route_cfg.annotate_values = annotate;
-            let mut kernel = Kernel::new(ollama.clone(), KernelConfig::default());
+                let mut kernel = Kernel::new(ollama.clone(), KernelConfig::default());
                 kernel.mount(Box::new(d));
                 if provider == "bedrock" {
                     let region = region.clone().unwrap_or_else(continuum::bedrock::default_region);
@@ -220,7 +226,7 @@ fn main() {
             let rec = serde_json::json!({
                 "qid": qid, "cat": cat, "question": question, "gold": gold, "pred": pred,
                 "fault": faulted, "loaded": loaded,
-                "haystack_turns": turns, "model": model, "path": if calc_path {"calc"} else {"system_template"},
+                "haystack_turns": turns, "model": model, "route_trace": route_trace, "path": if calc_path {"calc"} else {"system_template"},
                 "evidence_turns_total": ev_total, "evidence_turns_loaded": ev_loaded,
                 "evidence_sessions_total": ev_sessions_total.len(),
                 "evidence_sessions_loaded": ev_sessions_loaded.len(),
