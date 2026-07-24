@@ -21,6 +21,7 @@ fresh CONTINUUM_HOME each time, and compare:
 """
 
 import json
+import os
 import sys
 import urllib.request
 
@@ -42,7 +43,7 @@ CASES = [
             "Heads up: I'm pushing everything in my calendar back by exactly one week.",
         ],
         "question": "when is my dentist appointment?",
-        "needles": ["october 21"],
+        "truth": "October 21st (originally the 14th, pushed back one week)",
         "forbidden": ["october 14"],
     },
     {
@@ -52,7 +53,7 @@ CASES = [
             "My landlord told me everything goes up by 200 starting next month.",
         ],
         "question": "what will my rent be next month?",
-        "needles": ["2000", "2,000"],
+        "truth": "2000 a month (1800 plus the 200 increase)",
         "forbidden": ["1800"],
     },
     {
@@ -64,7 +65,7 @@ CASES = [
             "Final answer: I've settled on zed as my main editor for good.",
         ],
         "question": "what is my main editor these days?",
-        "needles": ["zed"],
+        "truth": "zed, and nothing else; naming vim, helix or neovim as the current editor is wrong",
         "forbidden": ["vim", "helix", "neovim"],
     },
     {
@@ -75,7 +76,7 @@ CASES = [
             "Standup is now 8:45, the earlier slot won the vote.",
         ],
         "question": "what time is standup?",
-        "needles": ["8:45"],
+        "truth": "8:45",
         "forbidden": ["9:00", "9:30"],
     },
     {
@@ -85,9 +86,8 @@ CASES = [
             "I've burned through about 62 thousand calls so far this month.",
         ],
         "question": "am I over my monthly API allowance?",
-        # Composition/verdict case: graded by the LLM judge, not substrings.
         "truth": "over the allowance by 12,000 (62k used vs 50k plan)",
-        "needles": [], "forbidden": [],
+        "forbidden": [],
     },
 ]
 
@@ -152,10 +152,11 @@ def main():
         reply, done = turn(c["question"])
         insp = (done or {}).get("inspector", {})
         low = reply.lower()
-        if c.get("truth"):
-            ok = judge_verdict(c["question"], c["truth"], reply)
-        else:
-            ok = verdict(reply, c["needles"])
+        # Verdict-only grading (#23): the judge decides correctness against the
+        # gold. Substring needles produced six corrupted results in this project,
+        # in both directions, most recently passing "Neovim (affectionately
+        # referred to as zed)" because the string "zed" appeared in it.
+        ok = judge_verdict(c["question"], c["truth"], reply)
         stale = contains_any(reply, c["forbidden"]) and not ok
         results.append({"case": c["name"], "reply": reply, "ok": ok, "stale": stale,
                         "store_topics": insp.get("store_topics"),
@@ -170,8 +171,28 @@ def main():
         print("!! infra failure: %d/%d turns errored (bedrock transport); run INVALID, not a model result" % (errored, len(results)))
     passed = sum(r["ok"] for r in results)
     print(f"\n=== store_context {'ON' if on else 'OFF'}: {passed}/{len(CASES)} ===")
-    with open(f"/tmp/discriminate_{MODE}.json", "w") as f:
-        json.dump(results, f, indent=2)
+    # Artifact naming carries the whole arm configuration, not just the mode
+    # this script happens to set. Deriving the filename from store_context alone
+    # meant two arms that varied a different flag both wrote discriminate_off
+    # and the second silently destroyed the first, losing the raw text needed to
+    # audit the comparison. The config is read back from the daemon so the name
+    # reflects what actually ran, not what was requested.
+    try:
+        cfg = json.loads(urllib.request.urlopen(f"{BASE}/v1/settings", timeout=15).read())
+    except Exception:
+        cfg = {}
+    parts = [f"store-{'on' if on else 'off'}",
+             f"annotate-{'on' if cfg.get('annotate_values') else 'off'}",
+             f"ungate-{'on' if cfg.get('entity_routing') or cfg.get('ungate_dense') else 'off'}",
+             f"model-{str(cfg.get('model', 'unknown')).replace(':', '_').replace('/', '_')}"]
+    tag = os.environ.get("ARM_TAG", "")
+    if tag:
+        parts.append(f"run-{tag}")
+    name = "_".join(parts)
+    out_path = f"/tmp/discriminate_{name}.json"
+    with open(out_path, "w") as f:
+        json.dump({"arm": parts, "settings": cfg, "results": results}, f, indent=2)
+    print(f"[artifact: {out_path}]")
 
 
 if __name__ == "__main__":

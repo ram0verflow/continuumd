@@ -181,8 +181,11 @@ impl HierarchicalTopicDriver {
     /// it ever ran. Bookkeeping can, because it does not have to decide which
     /// value is wanted, only which thing each value belongs to.
     ///
-    /// Returns (quantity, entity phrase, rendered date) per value.
-    fn annotate_message(&self, msg: &Message) -> Vec<(String, String, String)> {
+    /// Returns, per value: (word index, quantity text, entity phrase, short
+    /// date, type key). The type key is the value's measurement unit when it
+    /// has one and "count" otherwise; it is what makes ambiguity decidable by
+    /// counting rather than by judging relevance.
+    fn annotate_message(&self, msg: &Message) -> Vec<(usize, String, String, String, String)> {
         const SKIP: &[&str] = &[
             "the", "a", "an", "my", "your", "our", "their", "his", "her", "its", "this", "that",
             "these", "those", "and", "or", "but", "for", "with", "from", "into", "onto", "about",
@@ -200,7 +203,12 @@ impl HierarchicalTopicDriver {
             "gigabytes", "gigabyte", "gb", "mb", "megabytes", "tb", "terabytes", "hours", "hour",
             "hrs", "minutes", "minute", "days", "day", "weeks", "week", "months", "month",
             "years", "year", "thousand", "million", "requests", "calls", "dollars", "usd",
-            "percent", "%", "people", "times", "am", "pm",
+            "percent", "%", "times", "am", "pm",
+        ];
+        const COUNT_NOUNS: &[&str] = &[
+            "people", "person", "engineers", "engineer", "employees", "staff",
+            "members", "developers", "designers", "candidates", "attendees",
+            "calls", "requests", "tickets", "items", "seats", "guests",
         ];
         let clean = |w: &str| -> String {
             w.trim_matches(|c: char| !c.is_alphanumeric() && c != '%').to_lowercase()
@@ -211,11 +219,14 @@ impl HierarchicalTopicDriver {
                 && !c.chars().all(|ch| ch.is_ascii_digit() || ch == '.' || ch == ',')
                 && !SKIP.contains(&c.as_str())
                 && !UNITS.contains(&c.as_str())
+                && !COUNT_NOUNS.contains(&c.as_str())
         };
 
         let words: Vec<&str> = msg.text.split_whitespace().collect();
+        // Compact date: "2 Mar", not "2 March 2023". Annotation rides inline in
+        // the message, so every character competes with the retrieved text.
         let when = match parse_msg_date(&msg.timestamp) {
-            Some((y, m, d)) => fmt_date(y, m, d),
+            Some((_, m, d)) => format!("{d} {}", &MONTHS[(m - 1) as usize][..3]),
             None => msg.timestamp.clone(),
         };
         let mut out = Vec::new();
@@ -226,12 +237,17 @@ impl HierarchicalTopicDriver {
                 continue;
             }
             // The quantity carries its unit when the next word is one.
-            let unit = words
-                .get(i + 1)
-                .map(|n| clean(n))
-                .filter(|n| UNITS.contains(&n.as_str()))
-                .unwrap_or_default();
+            let next = words.get(i + 1).map(|n| clean(n)).unwrap_or_default();
+            let measured = UNITS.contains(&next.as_str());
+            let counted = COUNT_NOUNS.contains(&next.as_str());
+            // The trailing noun joins the quantity for display either way, so it
+            // reads as "15 people", but only a measurement unit makes a type.
+            let unit = if measured || counted { next.clone() } else { String::new() };
             let qty = if unit.is_empty() { c.clone() } else { format!("{c} {unit}") };
+            // Structural type key: the unit if measured, else a plain count.
+            // "12 engineers" and "15 people" are both counts and therefore
+            // confusable; "500 gigabytes" and "9 hours" are not.
+            let type_key = if measured { next.clone() } else { "count".to_string() };
 
             // The entity is the content words nearest the number, looking both
             // ways: "the basic tier caps at 100 gigabytes" names it before,
@@ -252,7 +268,7 @@ impl HierarchicalTopicDriver {
             }
             ent.truncate(3);
             let entity = if ent.is_empty() { "unspecified".to_string() } else { ent.join(" ") };
-            out.push((qty, entity, when.clone()));
+            out.push((i, qty, entity, when.clone(), type_key));
         }
         out
     }
@@ -814,41 +830,84 @@ impl MemoryIndexDriver for HierarchicalTopicDriver {
         // with several values can be rendered as a timeline instead of the
         // model silently picking one.
         let mut annotated: Vec<(String, String, String)> = Vec::new();
+
+        // Pass one: which values are actually ambiguous? A value is ambiguous
+        // when the working set holds another value of the same type, where type
+        // is the measurement unit if it has one and a plain count otherwise.
+        // This is counting and unit collision, deterministic and independent of
+        // the model, never a relevance judgment: the drive case has two
+        // gigabyte figures that are both topically valid, which is exactly why
+        // relevance cannot be the test. Unambiguous values are left alone, so
+        // annotation costs nothing where it would buy nothing.
+        let mut type_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        if self.route_cfg.annotate_values {
+            for &idx in indices {
+                if let Some(msg) = self.msg_by_idx(idx) {
+                    for (_, _, _, _, tk) in self.annotate_message(msg) {
+                        *type_counts.entry(tk).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
         let mut tokens = 0usize;
         for &idx in indices {
             let Some(msg) = self.msg_by_idx(idx) else { continue };
-            let line = if msg.timestamp.is_empty() {
+            let base = if msg.timestamp.is_empty() {
                 format!("{}: {}", msg.speaker, msg.text)
             } else {
                 format!("[{}] {}: {}", msg.timestamp, msg.speaker, msg.text)
             };
-            // Inline annotation: every quantity in this message carries what it
-            // belongs to and when it was stated, attached to the message it
-            // came from rather than collected somewhere else.
-            let ann: Vec<String> = if self.route_cfg.annotate_values {
-                self.annotate_message(msg)
-                    .into_iter()
-                    .map(|(qty, ent, when)| {
-                        annotated.push((ent.clone(), when.clone(), qty.clone()));
-                        format!("    ^ {qty} — {ent}, stated {when}")
-                    })
-                    .collect()
+
+            // Pass two: rewrite ambiguous quantities in place as a compact
+            // parenthetical, "500 gigabytes (external drive, 2 Mar)". Inline
+            // rather than on its own line, so it reads as metadata about the
+            // value rather than as another fact competing with it.
+            let line = if self.route_cfg.annotate_values {
+                let anns = self.annotate_message(msg);
+                let mut words: Vec<String> =
+                    msg.text.split_whitespace().map(|w| w.to_string()).collect();
+                // Right to left, so earlier edits do not shift later indices.
+                for (wi, qty, ent, when, tk) in anns.into_iter().rev() {
+                    if type_counts.get(&tk).copied().unwrap_or(0) < 2 {
+                        continue; // unambiguous: nothing to disambiguate
+                    }
+                    annotated.push((ent.clone(), when.clone(), qty.clone()));
+                    // Attach after the unit when there is one, else after the number.
+                    let at = if qty.contains(' ') && wi + 1 < words.len() { wi + 1 } else { wi };
+                    let trailing: String = words[at]
+                        .chars()
+                        .rev()
+                        .take_while(|c| !c.is_alphanumeric())
+                        .collect::<Vec<char>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    let cut = words[at].len() - trailing.len();
+                    let stem = words[at][..cut].to_string();
+                    words[at] = format!("{stem} ({ent}, {when}){trailing}");
+                }
+                let text = words.join(" ");
+                if msg.timestamp.is_empty() {
+                    format!("{}: {}", msg.speaker, text)
+                } else {
+                    format!("[{}] {}: {}", msg.timestamp, msg.speaker, text)
+                }
             } else {
-                Vec::new()
+                base
             };
-            let t = (line.len() + ann.iter().map(|a| a.len()).sum::<usize>()) / 4;
+
+            let t = line.len() / 4;
             if tokens + t > budget_tokens {
                 break;
             }
             parts.push(line);
-            for a in ann {
-                parts.push(a);
-            }
             tokens += t;
 
             // Deterministic temporal resolution ("MMU for dates"): if this
-            // message speaks in relative time, resolve it against the
-            // message's own timestamp and remember the note.
+            // message speaks in relative time, resolve it against the message's
+            // own timestamp and remember the note.
             if self.route_cfg.temporal_notes && notes.len() < 8 {
                 if let Some((y, m, d)) = parse_msg_date(&msg.timestamp) {
                     let tl = msg.text.to_lowercase();
@@ -864,6 +923,7 @@ impl MemoryIndexDriver for HierarchicalTopicDriver {
                 }
             }
         }
+
         let mut context = parts.join("\n");
         if self.route_cfg.annotate_values && !annotated.is_empty() {
             // Where one entity carries several values, show the sequence rather
@@ -1355,21 +1415,46 @@ mod annotation_tests {
     use super::*;
     use crate::driver::MemoryIndexDriver;
 
-    /// Every value must carry what it belongs to and when it was stated,
-    /// inline, attached to the message it came from. This is the precision
-    /// half: two same-unit numbers must stop being interchangeable tokens.
+    /// Ambiguous values carry their entity and date inline, compactly. Both
+    /// requirements from the spec: the drive case annotates all four gigabyte
+    /// values, and the eng case binds 12 to budgeted engineers and 15 to the
+    /// platform team.
     #[test]
-    fn values_are_annotated_inline_with_entity_and_date() {
+    fn ambiguous_values_are_annotated_inline_and_compactly() {
         let mut d = HierarchicalTopicDriver::new("/t");
-        let a = d.ingest_turn("user", "The basic tier caps at 100 gigabytes.", "3:00 pm on 3 March, 2023");
-        let b = d.ingest_turn("user", "My photo library weighs in at 620 gigabytes.", "4:00 pm on 12 August, 2023");
+        let a = d.ingest_turn("user", "The external drive holds 500 gigabytes.", "9:15 am on 2 March, 2023");
+        let b = d.ingest_turn("user", "I'm currently keeping 140 gigabytes up there.", "10:02 am on 3 March, 2023");
+        let c = d.ingest_turn("user", "The basic tier caps at 100 gigabytes.", "10:05 am on 3 March, 2023");
+        let e = d.ingest_turn("user", "My photo library weighs in at 620 gigabytes.", "6:40 pm on 12 August, 2023");
+        d.route_cfg.annotate_values = true;
+        let (ctx, _) = d.load_messages(&[a, b, c, e], 4000);
+        for want in ["500 gigabytes (external drive, 2 Mar)",
+                     "100 gigabytes (basic tier, 3 Mar)",
+                     "620 gigabytes (photo library, 12 Aug)"] {
+            assert!(ctx.contains(want), "missing {want:?}:\n{ctx}");
+        }
+        assert!(ctx.contains("140 gigabytes ("), "140 not annotated:\n{ctx}");
+        assert!(!ctx.contains("    ^"), "still emitting a separate annotation line:\n{ctx}");
+
+        let mut d2 = HierarchicalTopicDriver::new("/t");
+        let x = d2.ingest_turn("user", "We budgeted for 12 engineers this year.", "11:00 am on 14 February, 2023");
+        let y = d2.ingest_turn("user", "There are 15 people on the platform team now.", "3:30 pm on 20 August, 2023");
+        d2.route_cfg.annotate_values = true;
+        let (ctx2, _) = d2.load_messages(&[x, y], 4000);
+        assert!(ctx2.contains("12 engineers (budgeted, 14 Feb)"), "12 not bound:\n{ctx2}");
+        assert!(ctx2.contains("15 people (platform team, 20 Aug)"), "15 not bound:\n{ctx2}");
+    }
+
+    /// Selectivity: a value with no same-type rival is left alone, so
+    /// annotation costs nothing where it would buy nothing.
+    #[test]
+    fn unambiguous_values_are_left_alone() {
+        let mut d = HierarchicalTopicDriver::new("/t");
+        let a = d.ingest_turn("user", "The flight to Berlin is 9 hours.", "1:00 pm on 1 May, 2023");
+        let b = d.ingest_turn("user", "The external drive holds 500 gigabytes.", "2:00 pm on 1 May, 2023");
         d.route_cfg.annotate_values = true;
         let (ctx, _) = d.load_messages(&[a, b], 4000);
-
-        assert!(ctx.contains("100 gigabytes — basic tier"), "100 not bound to its entity:\n{ctx}");
-        assert!(ctx.contains("620 gigabytes — photo library"), "620 not bound to its entity:\n{ctx}");
-        assert!(ctx.contains("stated 3 March 2023"), "100's date missing:\n{ctx}");
-        assert!(ctx.contains("stated 12 August 2023"), "620's date missing:\n{ctx}");
+        assert!(!ctx.contains('('), "annotated values that had no same-type rival:\n{ctx}");
     }
 
     /// An attribute with several values must be rendered as a sequence, not
